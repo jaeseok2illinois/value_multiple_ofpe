@@ -1,0 +1,320 @@
+---
+title: "Causal Forest with combined data"
+author: "Jae Hwang"
+date: '2023-02-13'
+output: html_document
+---
+
+
+## Set up
+
+```{r, cache = F, echo = F, results = "hide"}
+library(knitr)
+library(here)
+knitr::opts_chunk$set(
+  cache = FALSE,
+  echo = FALSE,
+  warning = FALSE,
+  cache.lazy = FALSE,
+  fig.retina = 6,
+  fig.height = 9,
+  fig.width = 9,
+  message = FALSE,
+  error = TRUE
+)
+
+options(knitr.duplicate.label = "allow")
+```
+
+```{r colors and table width, cache = TRUE}
+colorize <- function(x, color) {
+  if (knitr::is_latex_output()) {
+    sprintf("\\textcolor{%s}{%s}", color, x)
+  } else if (knitr::is_html_output()) {
+    sprintf("<span style='color: %s;'>%s</span>", color,
+      x)
+  } else x
+}
+
+FitFlextableToPage <- function(ft, pgwidth = 6){
+
+  ft_out <- ft %>% autofit()
+
+  ft_out <- width(ft_out, width = dim(ft_out)$widths*pgwidth /(flextable_dim(ft_out)$widths))
+  return(ft_out)
+}
+
+```
+
+```{r a02-pacakages, cache = FALSE}
+library(here)
+library(sf)
+library(ggplot2)
+library(tmap)
+library(ggcorrplot)
+library(patchwork)
+library(flextable)
+library(officer)
+library(parallel)
+library(tidyverse)
+library(corrplot)
+library(data.table)
+library(GWmodel)
+library(ggridges)
+library(vtable)
+library(stargazer)
+library(mgcv)
+library(xgboost)
+library(caret)  
+library(e1071)  
+library(DiagrammeR)
+library(grf)
+#
+```
+
+
+
+```{r xgboost no ecs data ,echo=T, include = TRUE}
+
+
+
+##### Set multi_arm_causal_forest function 
+
+train_cf_ma <- function(dat_others){
+  macf_tau <-
+    grf::multi_arm_causal_forest(
+      X = dat_others %>%select(-c(yield,n_rate,treat))%>%
+        as.matrix(),
+      Y = dat_others[, yield],
+      W = dat_others[, treat]
+      # num.threads = 1
+    )
+}
+
+##### Set prediction and EONR finding functino #####
+
+predict_theta_cf <- function(trained_model, data, control, treat_ls, crop_price, input_price) {
+  
+    data_new <- data %>%select(-c(yield,n_rate,treat)) %>%
+      na.omit() %>%
+      as.matrix()
+  
+  pred <- cbind(obs_id = rep(data$obs_id, times = length(treat_ls)),
+                treat = rep(treat_ls, each = nrow(data)),
+                prediction = predict(trained_model, data_new)[[1]][, , 1] %>%
+                  as.vector()) %>%
+    data.table() %>%
+    
+    mutate(profit_diff = prediction*crop_price - (treat - control)*input_price)
+  
+  return(pred)
+}
+
+
+
+#######################################################
+# Causal Forest with Combined data vs individual field data
+#####################################################
+
+#### Read the Combined data
+
+dat_comb_bind <- readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/dat_comb_bind.rds') 
+
+#### Read the Field list in a combined data ####
+
+field_comb <-readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/field_comb.rds')
+
+
+#### Split farm / field / year information 
+#### and plug it into data
+#### ( variables for field fixed effect and time_variant factors)
+
+farm_name <- unique(dat_comb_bind$farm)
+farm_id <- seq(1:length(unique(dat_comb_bind$farm)))
+
+dat_comb_bind$farm_id <- rep(NA,length(dat_comb_bind$id))
+
+for(i in 1:length(farm_name)){
+dat_comb_bind$farm_id[which(dat_comb_bind$farm==farm_name[i])] <- farm_id[i]
+}
+
+field_name <- unique(dat_comb_bind$field)
+field_id <- seq(1:length(unique(dat_comb_bind$field)))
+
+dat_comb_bind$field_id <- rep(NA,length(dat_comb_bind$id))
+
+for(i in 1:length(field_name)){
+dat_comb_bind$field_id[which(dat_comb_bind$field==field_name[i])] <- field_id[i]
+}
+
+dat_comb_bind$year <- as.factor(dat_comb_bind$year)
+
+
+### Set Trial Information and Price  (Given market price )
+
+crop_price <-  5.5
+input_price <- 0.4
+input_type <- "N"
+trial_type <- "N"
+opt_n_i <- 150
+
+price_change <- c(0.4*5.5,0.6*5.5,0.8*5.5,1*5.5,1.2*5.5,1.4*5.5,
+                       1.6*5.5,1.8*5.5,2*5.5)
+
+
+
+##### Set a list to run a causal forest loop for -i field #### 
+bandwith_k <- 10
+
+max_list <- list()
+prof_est_list <- list()
+gam_eval_list <- list()
+xgb_model_list <- list()
+gam_res_list <-list()
+opt_n_merge <- list()
+opt_n_list <- list()
+
+
+#### Run Causal_Forest ########
+
+for( i in 1:length(unique(dat_comb_bind$id))){
+  
+#### Select Field ######
+
+ffy <- field_comb[i]  
+
+source("/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Codes/DIFM/Functions/unpack_field_parameters.R")
+
+
+####### Read analysis data #####
+
+data_sf <- here("Data/Growers", ffy, "Analysis-Ready/analysis_data.rds") %>% 
+  readRDS() %>% 
+  setnames(names(.), tolower(names(.))) %>% 
+  filter(!is.na(yield_vol)) %>% 
+  rename(yield = yield_vol) %>%
+  cbind(., st_coordinates(st_centroid(.))) 
+
+
+###### Run individual field i 's causal forest  ####
+
+
+analysis_res <- trial_info %>% 
+  mutate(data = rep(list(data_sf), nrow(.))) %>% 
+  rowwise() %>% 
+  mutate(
+    data = list(
+      setnames(
+        data.table::copy(data),
+        paste0("tgt_", tolower(input_type)),
+        "treat"))) %>%
+  mutate(control =  min(unique(data$treat))) %>%
+  mutate(treat_ls =  list(sort(unique(data$treat))[-1])) %>%
+  mutate(data = list(data %>% 
+                       mutate(treat = as.factor(treat)) %>%
+           mutate(mukey = as.numeric(mukey)) %>%
+           data.table(.))) %>%
+  mutate(field_vars = list(find_field_vars(data, trial_type, input_type))) %>%
+  mutate(cf_model = list(train_cf_ma(data, field_vars))) %>%
+  mutate(var_importance = list(var_import(cf_model, data, field_vars))) %>%
+  mutate(predict_prof = list(predict_theta_cf(cf_model, data, field_vars, control, treat_ls, crop_price, price, input_type, trial_type))) %>%
+  mutate(opt_ur = list(find_opt_u(predict_prof, control))) %>%
+  mutate(opt_vr = list(find_opt_vr(predict_prof, control))) %>%
+  mutate(prof_diff_vr_ur = list(get_prof_diff_vr_ur(predict_prof, opt_vr, opt_ur))) %>%
+  mutate(prof_diff_ur_gc = list(get_prof_diff_ur_gc(predict_prof, opt_ur, gc_rate[[1]]))) %>%
+  mutate(vr_map_data = list(vr_map(data_sf, opt_vr, input_type)))
+
+
+################################################################
+####### Run Causal Forest of combined data for field  - i ######
+#################################################################
+
+
+
+###### Select -i field and exclude variables
+###### which are not included in the anlaysis 
+
+dat_others <- dat_comb_bind[,c(2:18,23,25,27)]%>%na.omit()%>%
+            filter(field != str_split(field_comb,"_")[[i]][2]) %>% dplyr::select(-field)%>%data.table
+
+##### Remove ranges with little obs 
+dat_others  <- dat_others %>% filter( n_rate >=100, n_rate <290)
+
+# hist_n <- hist(dat_others$n_rate)
+
+##### Continous n-rate to discrete treat with bandwidth 10 ####
+
+bandwith_k <- 10
+dat_others$treat <-cut(dat_others$n_rate, breaks = seq(100,290,bandwith_k), labels = F)
+
+
+hist(dat_others$n_rate, breaks= seq(100,300,10))
+hist(dat_others$treat,breaks = seq(1,19,1))
+
+dat_others$treat <- dat_others$treat %>% as.factor()
+
+
+
+
+#### Select variables for training  (exclud yield, n_rate, treat)
+#### Tke min of treat as control and set treat list 
+field_vars <- colnames(dat_others %>% select(-c(yield,n_rate,treat)))
+control <-  min(unique(as.numeric(dat_others$treat)))
+treat_ls =  sort(unique(as.numeric(dat_others$treat)))[-1]
+
+
+##### Run causla forest for field - i ########
+
+cf_others <-train_cf_ma(dat_others)
+
+#### Check importance of variables 
+imp_vars <- variable_importance(cf_others)
+rownames(imp_vars) <- field_vars
+
+### Check Split frequencies ###
+
+cf_split <-split_frequencies(cf_others)
+
+cf_tree <-get_tree(cf_others,1)
+
+causal_tree <-plot(cf_tree)
+
+
+#### Predict 
+
+pred_prof <-predict_theta_cf(cf_others, dat_others, control, treat_ls, crop_price, input_price)
+
+pred_prof <-pred_prof %>%mutate(n_med = treat * 10 + 95)
+
+opt_ur <-find_opt_u(pred_prof, control)
+
+
+
+
+
+opt_ur_list[[i]] <- opt_ur
+pred_prof_list[[i]] <- pred_prof
+causal_tree_list[[i]] <- causal_tree
+cf_others_list[[i]] <- cf_others
+
+}
+
+
+prof_diff_1 <- ggplot(pred_prof,aes(x = n_med, y = profit_diff))  + 
+  geom_point() +
+  geom_smooth(method='glm', formula= y ~ x + I(x^2), col='Red')+
+  geom_text(x=266,y=125)+
+  xlim(100,300) +
+  ylim(-30,250)+
+    labs(x="Nitrogen (lbs/ac)",y="Profit Diff") + theme(legend.position='none')
+
+stat_smooth(aes(y=mpg), method = "lm", formula = y ~ x + I(x^2))  
+
+
+ggsave("prof_diff_field_1.pdf",path='/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Codes/Codes_indiv/JH', width = 5, height = 3, device='pdf', dpi=300)
+
+
+
+
+```
+

@@ -1,0 +1,1236 @@
+---
+title: "A Value of OFPE Data as a Public Good"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: true
+    number_sections: true
+---
+
+# Preparation
+
+## Set up
+
+```{r, cache = F, echo = F, results = "hide"}
+library(knitr)
+library(here)
+knitr::opts_chunk$set(
+  cache = FALSE,
+  echo = FALSE,
+  warning = FALSE,
+  cache.lazy = FALSE,
+  fig.retina = 6,
+  fig.height = 9,
+  fig.width = 9,
+  message = FALSE,
+  error = TRUE
+)
+
+options(knitr.duplicate.label = "allow")
+```
+
+```{r colors and table width, cache = TRUE}
+colorize <- function(x, color) {
+  if (knitr::is_latex_output()) {
+    sprintf("\\textcolor{%s}{%s}", color, x)
+  } else if (knitr::is_html_output()) {
+    sprintf("<span style='color: %s;'>%s</span>", color,
+      x)
+  } else x
+}
+
+FitFlextableToPage <- function(ft, pgwidth = 6){
+
+  ft_out <- ft %>% autofit()
+
+  ft_out <- width(ft_out, width = dim(ft_out)$widths*pgwidth /(flextable_dim(ft_out)$widths))
+  return(ft_out)
+}
+
+```
+
+```{r a02-pacakages, cache = FALSE}
+library(here)
+library(sf)
+library(ggplot2)
+library(tmap)
+library(ggcorrplot)
+library(patchwork)
+library(flextable)
+library(officer)
+library(parallel)
+library(tidyverse)
+library(corrplot)
+library(data.table)
+library(GWmodel)
+library(ggridges)
+library(vtable)
+library(stargazer)
+library(mgcv)
+library(xgboost)
+library(caret)  
+library(e1071)  
+library(DiagrammeR)
+
+#
+```
+
+
+
+
+## Parameters and functions
+
+```{r echo = F, results = "hide"}
+
+#### Selected Fields list####
+
+field_n <- c("Campbell_Goldenrod_2021","Chrz_42ac_2021","Gould_DamgaardWest_2021",  
+"GrigsbyGP_Field32_2021", "Hord_F98_2021","Hord_F104_2021",
+"Isermann_Florence80_2021","Nelson_DJWest_2021","Nelson_Dougshome_2021",
+"Pistorius_SyfordNorthEast_2021","Sasse_JensenWest_2021","Wendte_LaueLib80_2021",
+"Bohnhoff_Schormann_2020","Gould_Maras_2020", "Hord_F17_2020","Larson_BF2_2020","Nelson_Wirth_2020",
+"Rohrscheib_AlmyMain_2020","Sasse_JensenEast_2020",
+"Bohnhoff_Tims_2019", 
+"Campbell_Goldenrod_2019","Gould_BeithRoadNorth_2019","Gingerich_Malacarne1_2019",
+"Hord_F98_2019" ,"Wendte_LaueLib80_2019",
+"Bohnhoff_Adams_2018","Bohnhoff_Schormann_2018","Gingerich_Field2_2018",
+"Hord_F17_2018","Larson_OC1_2018","Nelson_Wirth_2018",
+"Rohrscheib_Almy_2018","Sasse_JensenEast_2018","Wendte_Snider_2018",
+"Bohnhoff_Tims_2017","Gingerich_Malacarne1_2017","Hord_F98_2017",
+"Nelson_Dougshome_2017","Overton_Richter77_2017",
+"Sasse_JensenWest_2017","Wendte_LaueLib80_2017",
+"Bohnhoff_Adams_2016","Bohnhoff_Schormann_2016",
+"Rohrscheib_Brach_2016")
+
+#--- source functions ---#
+source(here("Codes/DIFM/Functions/prepare.R"))
+
+#--- make pdf output smaller in size ---#
+pdf.options(useDingbats = TRUE)
+
+#--- field parameters ---#
+# source(here("Codes/DIFM/Functions/unpack_field_parameters.R"))
+
+
+crop_price_table <- fread("/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Data/CommonData/CropPrice.csv") %>% 
+  setnames(names(.), tolower(names(.))) %>% 
+  filter(type == "current") %>% 
+  rename(crop_price = price)
+
+input_price_table <- fread("/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Data/CommonData/InputPrice.csv") %>% 
+  setnames(names(.), tolower(names(.)))
+
+
+
+#--- read the variable name dictionary ---#
+dictionary <- fromJSON(
+  file.path(
+    here("Data", "CommonData"),
+    "variable_name_dictionary.json"
+  ),
+  flatten = TRUE
+) %>% 
+data.table()
+```
+
+
+```{r read-data-sets, results = "hide", include = TRUE}
+
+data_fin_list <-list()
+data_list <- list()
+
+for (i in 1:length(field_n)){
+  
+  ffy <-field_n[i] 
+  
+  data_file <- here("Data/Growers", ffy, "Analysis-Ready/analysis_data.rds") 
+  
+  if (!file.exists(data_file)) {
+       data_fin <-list()
+  } else {
+    data_fin <- here("Data/Growers", ffy, "Analysis-Ready/analysis_data.rds")%>%
+  readRDS() %>%
+   mutate(yield = yield_vol) %>% 
+  setnames(names(.), tolower(names(.))) %>% 
+  cbind(., st_coordinates(st_centroid(.)))%>%
+  select(-yield_vol)
+  }    
+data_fin_list[[i]] <- data_fin
+}
+
+var_names <- list()
+
+for(i in 1:length(data_fin_list)){
+variable_name <-names(data_fin_list[[i]])
+var_names[[i]] <- variable_name
+}
+
+var_names
+
+for(i in c(1:11,21,22,28,30,31,32,33,34,36,38,39,40,44)){
+  colnames(data_fin_list[[i]])[grep("file",names(data_fin_list[[i]]))]<-'elevation'
+} 
+
+ec_0_2_ex <- c()
+for(i in 1:length(data_fin_list)){
+ec_0_2_ex[i] <- 'ec_0_2' %in% names(data_fin_list[[i]])
+}
+
+which(ec_0_2_ex)
+#25,30,36
+data_fin_list[28][[1]]<- data_fin_list[28][[1]] %>% mutate(ecs = ec_0_2) %>%select(-ec_0_2)
+data_fin_list[34][[1]]<- data_fin_list[34][[1]] %>% mutate(ecs = ec_0_2) %>%select(-ec_0_2)
+data_fin_list[40][[1]]<- data_fin_list[40][[1]] %>% mutate(ecs = ec_0_2) %>%select(-ec_0_2)
+
+
+library(daymetr)
+library(lubridate)
+
+daymet_list <- list()
+cent_list <- list()
+
+for (i in 1:length(data_fin_list)){
+
+centroid <-data_fin_list[[i]] %>% 
+  st_union() %>%
+  st_transform(4326) %>%
+  st_centroid() %>%
+  st_coordinates()
+
+
+#--- download Daymet ---#
+# goes 20 years back from the current year
+temp_daymet <- download_daymet(
+    lat = centroid[1, "Y"],
+    lon = centroid[1, "X"],
+    start = 2002,
+    end = 2021 
+  ) %>% 
+  .$data %>% 
+  data.table()
+
+
+temp_daymet <- temp_daymet %>% 
+  setnames(
+    names(.)[-c(1,2)], 
+    c(
+      "day_length",
+      "precipitation",
+      "solar_radiation",
+      "shortwave_radiation",
+      "tmax",
+      "tmin",
+      "vapor_pressure"
+    )
+  ) %>% 
+  .[, date := as.Date(paste(year, yday, sep = "-"), "%Y-%j")] %>% 
+  .[, `:=`(
+    month = month(date),
+    day = day(date)
+  )] 
+
+
+daymet_list[[i]] <- temp_daymet
+cent_list[[i]] <- centroid
+
+}
+
+saveRDS(daymet_list
+, '/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/daymet_list.rds')
+
+
+saveRDS(cent_list, '/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/cent_list.rds')
+
+
+daymet_list<-readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/daymet_list.rds')
+cent_listt<-readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/cent_list.rds')
+
+
+
+data_wea_list <- list()
+        
+for (i in 1:length(data_fin_list)){
+  
+    that_year<-as.numeric(str_extract(field_n[i], '(?<=_)\\d+'))
+  
+    data_weather <-  data_fin_list[[i]]
+    
+    data_weather$prep_avg = as.numeric(rep(daymet_list[[i]] %>% filter(month %in% c(3:7)) %>%summarize(mean(precipitation)),nrow(data_fin_list[[i]])))
+                                                                                
+    data_weather$prep_year = as.numeric(rep( daymet_list[[i]] %>% filter(month %in% c(3:7) & year == that_year) %>% summarize( mean(precipitation)),nrow(data_fin_list[[i]])))
+    
+        data_weather$rad_avg = as.numeric(rep(daymet_list[[i]] %>% filter(month %in% c(3:7)) %>%summarize(mean(solar_radiation)),nrow(data_fin_list[[i]])))
+                                                                                
+    data_weather$rad_year = as.numeric(rep( daymet_list[[i]] %>% filter(month %in% c(3:7) & year == that_year) %>% summarize( mean(solar_radiation)),nrow(data_fin_list[[i]])))
+    
+    
+        data_weather$tmax_avg = as.numeric(rep(daymet_list[[i]] %>% filter(month %in% c(3:7)) %>%summarize(mean(tmax)),nrow(data_fin_list[[i]])))
+                                                                                
+    data_weather$tmax_year = as.numeric(rep( daymet_list[[i]] %>% filter(month %in% c(3:7) & year == that_year) %>% summarize( mean(tmax)),nrow(data_fin_list[[i]])))
+    
+    
+            data_weather$tmin_avg = as.numeric(rep(daymet_list[[i]] %>% filter(month %in% c(3:7)) %>%summarize(mean(tmin)),nrow(data_fin_list[[i]])))
+                                                                                
+    data_weather$tmin_year = as.numeric(rep( daymet_list[[i]] %>% filter(month %in% c(3:7) & year == that_year) %>% summarize( mean(tmin)),nrow(data_fin_list[[i]])))
+    
+    
+  
+  data_weather$prep_diff = data_weather$prep_year - data_weather$prep_avg
+  data_weather$rad_diff = data_weather$rad_year - data_weather$rad_avg
+  data_weather$tmax_diff = data_weather$tmax_year - data_weather$tmax_avg
+  data_weather$tmin_diff = data_weather$tmin_year - data_weather$tmin_avg
+  
+  data_wea_list[[i]] <- data_weather  
+  }
+
+
+##### Combine muptiple OFPE data ######
+
+data_comb_list <- list()
+
+for(i in 1:length(data_wea_list)){
+  if (length(data_wea_list[[i]]$s_rate) !=0){
+    data_comb <- data_wea_list[[i]]%>%
+       dplyr::select(yield,s_rate,n_rate,elevation,slope,aspect,curv,twi, clay,sand,silt,water_storage,prep_avg,prep_diff,rad_avg,rad_diff,tmax_avg,tmax_diff,tmin_avg,tmin_diff) %>%st_drop_geometry()
+    }  else {
+     data_comb <- list()
+    }
+  
+ data_comb_list[[i]] <- data_comb
+}
+
+
+saveRDS(data_comb_list,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/data_comb_list.rds' )
+
+
+which(summary(data_comb_list)[,1]==" 0")
+
+ field_comb <- field_n[-which(summary(data_comb_list)[,1]==" 0")]
+               
+
+ dat_comb_bind <- bind_rows(data_comb_list,.id="id") 
+
+saveRDS(field_comb,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/field_comb.rds')
+ 
+ 
+data_ecs_list <- list()
+geo_ecs_list <- list()
+
+for(i in 1:length(data_wea_list)){
+ if(length(data_wea_list[[i]]$s_rate) !=0 & length(data_wea_list[[i]]$ecs) !=0){
+       data_ecs <- data_wea_list[[i]]%>%
+       dplyr::select(yield,s_rate,ecs,n_rate,elevation,slope,aspect,curv,twi, clay,sand,silt,water_storage,prep_avg,prep_diff,rad_avg,rad_diff,tmax_avg,tmax_diff,tmin_avg,tmin_diff) %>% st_drop_geometry()
+       geo_ecs <-  st_geometry(data_wea_list[[i]])
+        } else {
+    data_ecs<-list()
+    geo_ecs <-list()
+} 
+ data_ecs_list[[i]] <- data_ecs
+ geo_ecs_list[[i]] <- geo_ecs
+}
+
+which(summary(data_ecs_list)[,1]==" 0")
+field_ecs <- field_n[-which(summary(data_ecs_list)[,1]==" 0")]
+
+dat_ecs_bind <- bind_rows(data_ecs_list, .id = 'id') 
+
+saveRDS(data_ecs_list,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/data_ecs_list.rds' )
+
+data_ecs_list <- readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/data_ecs_list.rds' )
+
+ saveRDS(field_ecs,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/field_ecs.rds')
+
+
+ 
+ 
+#### Think about making it under the list , check Taro's code !!!!!!
+#### Include s_rate, ecd,ecs,ec_0_2 
+
+split_info <-str_split(field_comb, pattern='_')
+
+dat_comb_bind$farm <- rep(NA,length(dat_comb_bind$id))
+dat_comb_bind$field <- rep(NA,length(dat_comb_bind$id))
+dat_comb_bind$year <- rep(NA,length(dat_comb_bind$id))
+   
+for(i in 1:length(field_comb)){
+    dat_comb_bind$farm[which(dat_comb_bind$id == i)] <-split_info[[i]][1]
+    dat_comb_bind$field[which(dat_comb_bind$id == i)] <- split_info[[i]][2]
+    dat_comb_bind$year[which(dat_comb_bind$id == i)] <- split_info[[i]][3]
+  }
+
+
+saveRDS(dat_comb_bind,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/dat_comb_bind.rds') 
+
+
+
+```
+
+
+
+```{r xgboost no ecs data ,echo=T, include = TRUE}
+
+dat_comb_bind <- readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/dat_comb_bind.rds') 
+
+#######################################################
+# XGboost traiing dat_comb_bind , dat_ecs_bind
+#####################################################
+
+#### Assign Farm and Field ID
+###### Make Farm_ID ( ALPHABETIC)
+field_comb <-readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/field_comb.rds')
+
+farm_name <- unique(dat_comb_bind$farm)
+farm_id <- LETTERS[1:length(unique(dat_comb_bind$farm))]
+
+dat_comb_bind$farm_id <- rep(NA,length(dat_comb_bind$id))
+
+for(i in 1:length(farm_name)){
+dat_comb_bind$farm_id[which(dat_comb_bind$farm==farm_name[i])] <- farm_id[i]
+}
+
+unique(dat_comb_bind$farm_id)
+
+###### Make Field_ID ( Numeric) ######
+
+field_name <- unique(dat_comb_bind$field)
+field_id <- seq(1:length(unique(dat_comb_bind$field)))
+
+dat_comb_bind$field_id <- rep(NA,length(dat_comb_bind$id))
+
+for(i in 1:length(field_name)){
+dat_comb_bind$field_id[which(dat_comb_bind$field==field_name[i])] <- field_id[i]
+}
+
+unique(dat_comb_bind$field_id)
+
+names(dat_comb_bind)
+
+dat_comb_bind$year <- as.factor(dat_comb_bind$year)
+
+
+### Change Yield unit of Field "EB2"
+
+max_list <- list()
+prof_est_list <- list()
+gam_eval_list <- list()
+xgb_model_list <- list()
+gam_res_list <-list()
+opt_n_merge <- list()
+opt_n_list <- list()
+
+
+# 9 "Nelson_Dougshome_2021"
+# 31 "Nelson_Wirth_2018"
+# 38 "Nelson_Dougshome_2017"
+
+crop_price_change <- c(0.4*5.5,0.6*5.5,0.8*5.5,1*5.5,1.2*5.5,1.4*5.5,
+                       1.6*5.5,1.8*5.5,2*5.5)
+
+#####
+for( i in 1:length(unique(dat_comb_bind$id))){
+  
+ffy <- field_comb[i]  
+
+source(here("Codes/DIFM/Functions/unpack_field_parameters.R"))
+
+
+##### i !=37 (dat_comb), i !=22 (dat_comb)
+data_sf <- readRDS(paste0("/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Data/Growers/", ffy, "/Analysis-Ready/analysis_data.rds")) %>%
+  rename(yield = yield_vol) %>%
+  setnames(names(.), tolower(names(.))) %>%
+  filter(!is.na(yield)) %>%
+  cbind(., st_coordinates(st_centroid(.)))
+
+
+
+####### R - leaner Random Forest / Casual Forest / Xgb
+
+
+dat_boost_1 <- dat_comb_bind %>%filter(field == str_split(field_comb,"_")[[i]][2] & 
+                                         year == str_split(field_comb,"_")[[i]][3] )
+
+dat_boost_other <- dat_comb_bind%>%
+           filter(field != str_split(field_comb,"_")[[i]][2])
+
+
+dat_train <- dat_boost_other
+dat_test <- dat_boost_1
+
+
+x_dat_train <- data.matrix(dat_train%>%dplyr::select(-c('id','farm','field','yield')))
+y_dat_train <- dat_train[,'yield']
+ 
+x_dat_test <- data.matrix(dat_test%>%dplyr::select(-c('id','farm','field','yield')))
+y_dat_test <- dat_test[,'yield']
+
+
+# convert the train and test data into xgboost matrix type.
+xgb_train = xgb.DMatrix(data=x_dat_train, label=y_dat_train)
+
+
+##### train a model using our training data
+
+xgb_model <- xgboost( data = xgb_train,
+                objective = "reg:squarederror",
+                 max.depth=4,        # maxx depth
+                 nrounds=100)            # max number of boosting iterations
+
+
+##### Make TEST and Prediction ######
+
+n_rate_seq <-seq(
+        quantile(x_dat_test[,'n_rate'], 0.025),
+        quantile(x_dat_test[,'n_rate'], 0.975),
+        length = 100
+      )
+
+
+pred_dat <- list()
+
+for(j in 1:100){ 
+x_dat_test2 <- x_dat_test
+x_dat_test2[,'n_rate']<- n_rate_seq[j]
+
+xgb_test = xgb.DMatrix(data=x_dat_test2)
+
+
+y_hat = predict(xgb_model, xgb_test)
+
+
+## Data with Prediction on n_rate sequnce from 1(lowest) to 100(highest)
+pred_dat[[j]]<-data.table(cbind(y_hat,x_dat_test2))
+}
+
+pred_comb <-bind_rows(pred_dat,.id="n_seq")
+pred_comb$n_seq <- as.numeric(pred_comb$n_seq)
+
+
+##########
+
+analysis_res_g <- trial_info %>% 
+  left_join(crop_price_table, by = "crop") %>% 
+  mutate(data = rep(list(data_sf), nrow(.))) %>% 
+  rowwise() %>% 
+  mutate(
+    data = list(
+      setnames(
+        data.table::copy(data),
+        paste0(tolower(input_type), "_rate"),
+        "input_rate"
+      )
+    )
+  ) %>%  
+  mutate(
+    field_vars = list(
+      find_field_vars(data)
+    )
+  ) %>% 
+  mutate(
+    data = list(
+      gen_y_res(data, field_vars)
+    )
+  ) %>% 
+  mutate(
+    data = list(
+      run_gwr(subset(data, input_rate != 0), "input_rate")  
+    )
+  ) 
+
+analysis_res_m <- analysis_res_g %>% 
+  mutate(
+    data = list(
+      define_mz(
+        data = data, 
+        max_num_zones = 1, 
+        min_obs = 300
+      ) 
+    )
+  )
+
+analysis_res_gam <- analysis_res_m %>% 
+  mutate(gam_res = list(
+    run_scam_gam(data = data, field_vars = field_vars)
+  ))   
+
+
+for (k in 1:9){
+  
+  analysis_res_gam$crop_price <- crop_price_change[k]
+  
+
+analysis_res_e <- analysis_res_gam %>% 
+  #=== single average observation by zone ===#
+  mutate(data_for_eval = list(
+    make_data_for_eval(
+      data = data,
+      est = gam_res
+    )
+  )) %>% 
+  #=== input rate sequence by zone to be tested ===#
+  mutate(input_rate_seq = list(
+    data.table(data)[, .(
+      input_rate = seq(
+        quantile(input_rate, 0.025),
+        quantile(input_rate, 0.975),
+        length = 100
+      )
+    ),
+    by = zone_txt]
+  )) %>% 
+  #=== predict yield values at different input rates ===#
+  mutate(eval_data = list(
+    predict_yield_range(
+      data_for_eval = data_for_eval, 
+      input_rate_seq = input_rate_seq,
+      est = gam_res
+    ) %>% 
+    .[, type := "opt_v"]%>% 
+    .[, .(
+      input_rate, zone_txt, type, yield_hat, yield_hat_se
+    )]
+  )) %>% 
+  #=== Adjust yield values to match up with actual yields (this is purely for figures below) ===#
+  mutate(
+    #=== mean predicted yield ===#
+    mean_yield_hat_opt = 
+    list(
+      eval_data[, .(mean_yield_hat = mean(yield_hat)), by = zone_txt]
+    ), 
+    #=== mean actual yield by zone ===#
+    mean_yield_actual = 
+    list(
+      data.table(data)[, 
+      .(mean_yield_actual = mean(yield)), 
+      by = zone_txt
+      ]
+    ),
+    #=== shift yield so that figures look ===#
+    yield_shift_opt = 
+    list(
+      mean_yield_actual[mean_yield_hat_opt, on = "zone_txt"] %>% 
+        .[, yield_shift :=  mean_yield_actual - mean_yield_hat] %>% 
+        .[, .(zone_txt, yield_shift)]
+    ),
+    eval_data = 
+    list(
+      eval_data %>% 
+      yield_shift_opt[., on = "zone_txt"] %>% 
+      .[, yield_hat := yield_hat + yield_shift] %>% 
+      .[, profit_hat := crop_price * yield_hat - price * input_rate] %>% 
+      .[, profit_hat_se := crop_price * yield_hat_se] 
+    )
+  ) %>% 
+  dplyr::select(
+    - mean_yield_hat_opt, 
+    - yield_shift_opt, 
+    - mean_yield_actual
+  ) %>% 
+  mutate(opt_input_data = list(
+   opt_input_data <- eval_data %>% 
+    .[, .SD[profit_hat == max(profit_hat), ], by = zone_txt] %>% 
+    setnames("input_rate", "opt_input") 
+  )) %>% 
+  #=== assign optimal variable input rate to the data ===#
+  mutate(data = list(
+    left_join(
+      data, 
+      opt_input_data,
+      by = "zone_txt"
+    )
+  )) %>% 
+  #=== find the optimal uniform rate ===#
+  mutate(data = list(
+    mutate(
+      data, 
+      opt_input_u = find_opt_u(
+        data = data, 
+        gam_res = gam_res,
+        crop_price = crop_price,
+        input_price = price
+      )
+    )
+  ))
+
+
+ prof_est_comb  <- pred_comb %>% mutate(profit_hat = crop_price_change[k] * y_hat - 0.4 * n_rate) %>%
+   group_by(n_seq) %>%summarise(yield_hat_train = mean(y_hat),yield_hat_train_se =sd(y_hat), n_rate_train = mean(n_rate),profit_hat_train = mean(profit_hat),profit_hat_train_se = sd(profit_hat)) %>%data.table()
+ 
+
+ gam_eval_field <- analysis_res_e[which(analysis_res_e$input_type=="N"),]$eval_data[[1]]%>%rename(n_rate_gam=input_rate) %>% select(-zone_txt)
+ 
+#  prof_by_n_seq 
+
+opt_n_by_train <-prof_est_comb %>%
+    .[, .SD[profit_hat_train == max(profit_hat_train), ]]
+
+opt_n_by_gam <-gam_eval_field %>% 
+    .[, .SD[ profit_hat == max( profit_hat), ]]
+
+opt_train_with_gam <- gam_eval_field %>% filter(
+   n_rate_gam > round(opt_n_by_train$n_rate_train)-0.5 & 
+    n_rate_gam < round(opt_n_by_train$n_rate_train)+0.5)  
+
+opt_train_in_gam <- opt_train_with_gam[1,]  
+
+opt_train_in_gam$type <- 'train'
+opt_n_by_gam$type <- 'gam'
+opt_train_in_gam$price_ratio <- c(0.4,0.6,0.8,1,1.2,1.4,1.6,1.8,2)[k]
+opt_n_by_gam$price_ratio <- c(0.4,0.6,0.8,1,1.2,1.4,1.6,1.8,2)[k]
+opt_train_in_gam$farm <- str_split(ffy, pattern='_')[[1]][1]
+opt_n_by_gam$farm  <- str_split(ffy, pattern='_')[[1]][1]
+opt_train_in_gam$field <- str_split(ffy, pattern='_')[[1]][2]
+opt_n_by_gam$field  <- str_split(ffy, pattern='_')[[1]][2]
+opt_train_in_gam$year <- str_split(ffy, pattern='_')[[1]][3]
+opt_n_by_gam$year  <- str_split(ffy, pattern='_')[[1]][3]
+
+opt_n_merge[[k]] <-rbind(opt_n_by_gam,opt_train_in_gam)
+
+}
+
+opt_n_stack  <-bind_rows(opt_n_merge,.id='id')
+
+#### Max Profit of Field1 by Xgboost training and prediction
+
+#######
+gam_res_in <-analysis_res_gam %>%filter(input_type=='N')  
+
+gam_model_selection<-gam_res_in$gam_res[[1]]
+
+# 
+#  m1 <- analysis_res_e %>% filter(input_type=='N') 
+# 
+# 
+
+prof_est_list[[i]] <- prof_est_comb
+gam_eval_list[[i]] <- gam_eval_field
+xgb_model_list[[i]] <- xgb_model
+gam_res_list[[i]] <- gam_model_selection
+opt_n_list[[i]] <- opt_n_stack
+}
+
+
+
+#####  Without EC data ######
+
+saveRDS( opt_n_list,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/opt_n_list.rds')
+
+saveRDS( prof_est_list,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/prof_est_list.rds')
+
+saveRDS( gam_eval_list,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/gam_eval_list.rds')
+
+saveRDS( gam_res_list,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/gam_res_list.rds')
+
+saveRDS(xgb_model_list,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/xgb_model_list.rds')
+
+
+
+```
+
+
+```{r xgboost after, results = "hide", include = TRUE}
+
+library(gtsummary)
+
+
+dat_comb_bind$yeart<- dat_comb_bind$year+2015
+
+             
+
+
+  dat_table_year <- dat_comb_bind %>%
+    select(yeart,yield, n_rate,s_rate,elevation,slope,aspect,twi,clay,sand,silt,water_storage) %>%tbl_summary(by=yeart,
+        statistic = list(all_continuous() ~ "{mean} ({sd})"),   # stats and format for categorical columns
+    digits = all_continuous() ~ 2,                              # rounding for continuous columns
+    type   = all_categorical() ~ "continuous",
+    missing = 'no',
+    # force all categorical levels to display
+    label  = list(                                              # display labels for column names
+       yield   ~ "Yield \n (bu/ac)",                           
+      n_rate    ~ "Nitrogen (lbs/ac)",
+      s_rate ~ "Seed (K/ac)",
+      elevation ~ "Elevation",
+      slope ~ "Slope",
+      aspect ~"Aspect",
+      twi ~ "TWI",
+      clay ~" Clay",
+      sand ~ "Sand",
+      silt ~"Silt",
+      water_storage ~ "Water Storage",
+    missing = 'no'
+      )
+    ) %>%
+    modify_header(label = "**Variables**",
+                  stat_by =  "**{level}**<br>N = {n}") %>%
+     modify_footnote(all_stat_cols() ~ "Number of observations") %>%
+    as_gt()%>%
+    gt::tab_row_group(
+    group = "SSURGO ",
+    rows = 8:11) %>% 
+  gt::tab_row_group(
+    group = "DEM",
+    rows = 4:7) %>%  
+  gt::tab_row_group(
+    group = "Inputs",
+    rows = 2:3) %>%  
+  gt::tab_row_group(
+    group = "Output",
+    rows = 1) %>% tab_options(
+    column_labels.border.top.width = px(2),
+    column_labels.border.top.color = "transparent",
+    table.border.top.color = "black",
+    table.border.bottom.color = "grey",
+    data_row.padding = px(6),
+    source_notes.font.size = 3,
+    table.font.size = 9,
+    heading.align = "middle",
+    #Adjust grouped rows to make them stand out
+    row_group.background.color = "grey")
+  
+
+
+  gtsave(dat_table_year,'/Users/hwangjaeseok/Desktop/2YP Revision/dat_table_year.png')
+
+library(cowplot)
+
+  dat_table1 <- ggdraw() + draw_image('/Users/hwangjaeseok/Desktop/2YP Revision/dat_table_year.png', scale = 1)
+
+opt_merge_tab<-plot_grid(p06, p1,axis = "l", align = "v"
+                        , nrow = 1)
+
+ggsave("dat_table1",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 3, device='pdf', dpi=300)
+  
+  
+dat_plot <- dat_comb_bind %>%
+  filter(yeart==2017)%>%
+  select(field_id,yield,n_rate,elevation,slope,aspect,water_storage)
+
+
+dat_plot$field_id <- as.factor(dat_plot$field_id)
+
+yield_dist_fig_2017 <-ggplot(dat_plot, aes(x = yield, y = field_id)) +geom_density_ridges_gradient(quantile_lines = TRUE, alpha = 0,
+                      quantiles = 2) + xlim(100,350) +
+    labs(x="Yield",y="Field ID") + theme(legend.position='none')
+
+ggsave("plot_yield_2017.pdf",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 3, device='pdf', dpi=300)
+
+nitro_dist_fig_2017 <-ggplot(dat_plot, aes(x = n_rate, y = field_id)) +geom_density_ridges_gradient(quantile_lines = TRUE, alpha = 0,
+                      quantiles = 2) + xlim(100,300) +
+  labs(x="Nitrogen",y="Field ID") +
+theme(legend.position='none')
+
+ggsave("plot_nitro_2017.pdf",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 3, device='pdf', dpi=300)
+
+slop_dist_fig_2017 <-ggplot(dat_plot, aes(x = slope, y = field_id, fill = stat(x))) +geom_density_ridges_gradient(quantile_lines = TRUE, alpha = 0.75,
+                      quantiles = 2) + xlim(0.00,0.05) +
+  scale_fill_viridis_c(name = "Slope ", option = "E",direction=-1) +
+  labs(x="Slope",y="Field_ID")
+
+ggsave("plot_slop_2017",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 3, device='pdf', dpi=300)
+
+
+
+############### Gam Regression Table ##############
+
+#1. Read Dr.Jared's Review
+#2. Think How I will add Gam regression results
+#3. Need to Show that GAM make different selection / different functional model 
+
+
+opt_n_list <-readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/opt_n_list.rds')
+
+max_list<-readRDS( '/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/max_list.rds')
+
+prof_est_list <-readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/prof_est_list.rds')
+
+
+xgb_model_list<- readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/xgb_model_list.rds')
+
+gam_eval_list<- readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/gam_eval_list.rds')
+
+
+
+
+
+
+#########
+
+opt_n_bind <- bind_rows(opt_n_list,.id='opt_id')
+
+names(opt_n_bind)
+
+farm_name <- unique(opt_n_bind$farm)
+farm_id <- LETTERS[1:length(unique(opt_n_bind$farm))]
+
+opt_n_bind$field_id <- rep(NA,length(opt_n_bind$id))
+opt_n_bind$farm_id <- rep(NA,length(opt_n_bind$id))
+
+for(i in 1:length(field_name)){
+opt_n_bind$field_id[which(opt_n_bind$field==field_name[i])] <- field_id[i]
+}
+
+
+for(i in 1:length(farm_name)){
+opt_n_bind$farm_id[which(opt_n_bind$farm==farm_name[i])] <- farm_id[i]
+}
+
+
+unique(opt_n_bind$field_id)
+unique(opt_n_bind$farm_id)
+
+names(opt_n_bind)
+
+opt_n_bind$year <- as.factor(opt_n_bind$year)
+
+
+
+saveRDS(opt_n_bind,'/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/opt_n_bind.rds')
+
+
+
+
+
+###################################
+### Header or Description!!!!
+library(reshape2)
+library(htmlTable)
+library(gt)
+
+### x = field , y = profit, group = type  
+
+opt_n_bind<- readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/opt_n_bind.rds')
+
+
+opt_n_gam_sel <-opt_n_bind%>%
+     filter(type=="gam")%>%
+     select(profit_hat,type,price_ratio,opt_id,field_id,year)
+   
+opt_n_train_sel <-opt_n_bind%>%
+     filter(type=="train")%>%
+     select(profit_hat,type,price_ratio,opt_id,field_id,year)
+   
+
+opt_n_gam_sel$profit_diff <- opt_n_gam_sel$profit_hat - opt_n_train_sel$profit_hat  
+  
+
+opt_profit_diff <- opt_n_gam_sel%>%select(profit_diff,price_ratio,opt_id,field_id,year) 
+   
+
+################################# 2021 ################
+
+
+
+opt_diff_year <- opt_profit_diff %>% filter(price_ratio==0.6)%>% mutate(profit_diff2 = round(profit_diff,2)) %>%select(field_id,profit_diff2,year) 
+
+opt_diff_rsh<-reshape(opt_diff_year, direction = "wide", idvar = "field_id", timevar = "year")
+
+names(opt_diff_rsh) <- c("field_id", "y2021","y2020","y2019","y2018","y2017","y2016")
+
+
+is_Low <- function(x) {
+  x <= 1
+}
+
+is_Mid <- function(x) {
+   x >1 & x <= 10
+}
+
+
+opt_tab_all <-opt_diff_rsh%>%
+  arrange(field_id)%>%
+  gt()%>%
+   fmt_missing(
+    columns = 2:7,
+    missing_text = "-"
+  )%>% 
+   tab_footnote(
+    footnote = md("profit difference is less than $1 per acre"),
+    locations = list(
+      cells_body( columns = y2021,
+             rows = is_Low(y2021)),
+       cells_body( columns = y2020,
+             rows = is_Low(y2020)),
+       cells_body( columns = y2019,
+             rows = is_Low(y2019)), 
+      cells_body( columns = y2018,
+             rows = is_Low(y2018)),
+       cells_body( columns = y2017,
+             rows = is_Low(y2017)),
+       cells_body( columns = y2016,
+             rows = is_Low(y2016))
+    )
+    )%>%
+   tab_footnote(
+    footnote = md("profit difference is greater than $1 but less than $10 per acre"),
+    locations = list(
+       cells_body( columns = y2021,
+             rows = is_Mid(y2021)),
+       cells_body( columns = y2020,
+             rows = is_Mid(y2020)),
+       cells_body( columns = y2019,
+             rows = is_Mid(y2019)), 
+      cells_body( columns = y2018,
+             rows = is_Mid(y2018)),
+       cells_body( columns = y2017,
+             rows = is_Mid(y2017)),
+       cells_body( columns = y2016,
+             rows = is_Mid(y2016))
+    )
+    )%>%
+    tab_spanner(
+    label = md("Profit difference($/ac) <br> when input and output price ratio is **0.121** "),
+    id = "pdiff",
+    columns = c(y2021,y2020,y2019,y2018,y2017,y2016)
+     ) %>%
+   tab_footnote(
+    footnote = md("Profit by true EONR - profit by predicted EONR"),
+    locations = list(
+      cells_column_spanners( 
+        spanners="pdiff")
+    )
+    )%>%
+  opt_footnote_marks(marks = c("*","+","++"))%>%
+  cols_label(field_id = md("FIELD ID")) %>%
+  opt_table_font(
+    font = list(
+      google_font("Chivo"),
+      default_fonts()
+    )
+  ) %>%
+  cols_width(c(field_id) ~ px(50),
+             c(y2021,y2020,y2019,y2018,y2017,y2016)~px(50)) %>% 
+  tab_options(
+    column_labels.border.top.width = px(3),
+    column_labels.border.top.color = "black",
+    table.font.size = 10,
+    table.border.top.color = "black",
+    table.border.bottom.color = "grey",
+    data_row.padding = px(3),
+    heading.title.font.size = 10,
+    source_notes.font.size = 10,
+    heading.align = "left",
+    #Adjust grouped rows to make them stand out
+    row_group.background.color = "black")
+
+gtsave(opt_tab_all,'/Users/hwangjaeseok/Desktop/2YP Revision/opt_tab_p1.png')
+gtsave(opt_tab_all,'/Users/hwangjaeseok/Desktop/2YP Revision/opt_tab_p0.6.png')
+gtsave(opt_tab_all,'/Users/hwangjaeseok/Desktop/2YP Revision/opt_tab_p1.4.png')
+
+library(cowplot)
+p06 <- ggdraw() + draw_image('/Users/hwangjaeseok/Desktop/2YP Revision/opt_tab_p0.6.png', scale = 1)
+p1 <- ggdraw() + draw_image('/Users/hwangjaeseok/Desktop/2YP Revision/opt_tab_p1.png', scale = 1)
+p14 <- ggdraw() + draw_image('/Users/hwangjaeseok/Desktop/2YP Revision/opt_tab_p1.4.png', scale = 1)
+
+opt_merge_tab<-plot_grid(p06, p1,axis = "l", align = "v"
+                        , nrow = 1)
+
+ggsave("opt_merge_tab",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 3, device='pdf', dpi=300)
+#######################################################
+
+
+###### 1 to 1 Comparison between GAM EONR and Predicted EONR. 
+
+#####
+opt_profit_diff$price_status <- rep(NA,length(opt_profit_diff$opt_id))
+opt_profit_diff$price_status[which(opt_profit_diff$price_ratio==0.4)] <-0.182
+opt_profit_diff$price_status[which(opt_profit_diff$price_ratio==0.6)] <-0.121
+opt_profit_diff$price_status[which(opt_profit_diff$price_ratio==0.8)] <-0.091
+opt_profit_diff$price_status[which(opt_profit_diff$price_ratio==1.0)] <-0.073
+opt_profit_diff$price_status[which(opt_profit_diff$price_ratio==1.2)] <-0.061
+opt_profit_diff$price_status[which(opt_profit_diff$price_ratio==1.4)] <-0.052
+opt_profit_diff$price_status[which(opt_profit_diff$price_ratio==1.6)] <-0.045
+opt_profit_diff$price_status[which(opt_profit_diff$price_ratio==1.8)] <-0.040
+opt_profit_diff$price_status[which(opt_profit_diff$price_ratio==2.0)] <-0.036
+                  
+
+prof_trend_3 <- ggplot( opt_profit_diff%>%filter(field_id==3))+
+ geom_line(aes(y=profit_diff,x=price_status,colour=year)) +
+  geom_point(aes(y=profit_diff,x=price_status,colour=year)) +
+ scale_x_continuous(breaks = c(0.045,0.073,0.121,0.182) , 
+                     labels = c(0.045,"0.073(*)",0.121,0.182), limits = c(0.03, 0.19)) +
+   scale_color_manual(values=c("2017"="red","2019"="blue","2021"='black'))+
+  labs(title="FIELD 3", x='Status of input(N) and output(corn) price ratio',y ='Profit Differences \ ($/ac)',        caption= " 0.073(*) is a ratio of the market price ")+ 
+   ylim(0,50)  +
+  theme(title =element_text(size=9, face='bold'),
+        legend.position = "bottom",
+        legend.text = element_text(size=9)) 
+
+ggsave("prof_trend_field3",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 3, device='pdf', dpi=300)
+
+
+
+prof_trend_6 <- ggplot( opt_profit_diff%>%filter(field_id==6))+
+ geom_line(aes(y=profit_diff,x=price_status,colour=year)) +
+  geom_point(aes(y=profit_diff,x=price_status,colour=year)) +
+  scale_x_continuous(breaks = c(0.045,0.073,0.121,0.182) , 
+                     labels = c(0.045,"0.073(*)",0.121,0.182), limits = c(0.03, 0.19)) +
+  scale_color_manual(values=c("2017"="red","2021"='black'))+
+   labs(title="FIELD 6", x='Status of input(N) and output(corn) price ratio',y ='Profit Differences \ ($/ac)') +
+   ylim(0,20)  +
+  theme(title =element_text(size=9, face='bold'),
+        legend.position = "bottom",
+        legend.text = element_text(size=9)) 
+
+
+ggsave("prof_trend_field6",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 3, device='pdf', dpi=300)
+
+
+prof_trend_7 <- ggplot( opt_profit_diff%>%filter(field_id==7))+
+ geom_line(aes(y=profit_diff,x=price_status,colour=year)) +
+  geom_point(aes(y=profit_diff,x=price_status,colour=year)) +
+ scale_x_continuous(breaks = c(0.045,0.073,0.121,0.182) , 
+                     labels = c(0.045,"0.073(*)",0.121,0.182), limits = c(0.03, 0.19)) +
+  scale_color_manual(values=c("2017"="red","2021"='black'))+
+   labs(title="FIELD 7", x='Status of input(N) and output(corn) price ratio',y ='Profit Differences \ ($/ac)') +
+   ylim(0,20)  +
+  theme(title =element_text(size=9, face='bold'),
+        legend.position = "bottom",
+        legend.text = element_text(size=9)) 
+
+
+ggsave("prof_trend_field7",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 3, device='pdf', dpi=300)
+
+
+prof_trend_8 <- ggplot( opt_profit_diff%>%filter(field_id==8))+
+ geom_line(aes(y=profit_diff,x=price_status,colour=year)) +
+  geom_point(aes(y=profit_diff,x=price_status,colour=year)) +
+  scale_x_continuous(breaks = c(0.045,0.073,0.121,0.182) , 
+                     labels = c(0.045,"0.073(*)",0.121,0.182), limits = c(0.03, 0.19)) +
+     scale_color_manual(values=c("2017"="red","2019"="blue","2021"='black'))+
+   labs(title="FIELD 8", x='Status of input(N) and output(corn) price ratio',y ='Profit Differences \ ($/ac)') +
+   ylim(0,200)  +
+  theme(title =element_text(size=9, face='bold'),
+        legend.position = "bottom",
+        legend.text = element_text(size=9)) 
+
+
+ggsave("prof_trend_field8",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 3, device='pdf', dpi=300)
+
+
+
+
+
+###############3
+
+dat_comb_bind
+
+gam_eval_list
+
+prof_est_list
+
+
+prof_est_bind <- bind_rows(prof_est_list,.id='id')
+prof_est_bind$field_id <- rep(NA,length(prof_est_bind$id))
+prof_est_bind$year <- rep(NA,length(prof_est_bind$id))
+
+gam_eval_bind <- bind_rows(gam_eval_list,.id='id')
+gam_eval_bind$field_id <- rep(NA,length(gam_eval_bind$id))
+gam_eval_bind$year <- rep(NA,length(gam_eval_bind$id))
+
+
+for(i in 1:39){
+prof_est_bind$field_id[which(prof_est_bind$id==i)]<-unique(dat_comb_bind$field_id[which(dat_comb_bind$id==i)])
+prof_est_bind$year[which(prof_est_bind$id==i)]<-unique(dat_comb_bind$year[which(dat_comb_bind$id==i)])
+gam_eval_bind$field_id[which(gam_eval_bind$id==i)]<-unique(dat_comb_bind$field_id[which(dat_comb_bind$id==i)])
+gam_eval_bind$year[which(gam_eval_bind$id==i)]<-unique(dat_comb_bind$year[which(dat_comb_bind$id==i)])
+}
+
+prof_res <- prof_est_bind %>% select(field_id,year, yield_hat_train, n_rate_train,profit_hat_train) %>%
+    rename(yield_train = yield_hat_train) %>%
+    rename(profit_train = profit_hat_train)
+ 
+gam_res <- gam_eval_bind %>% select(field_id, yield_hat, n_rate_gam,profit_hat) %>%
+    rename(yield_gam = yield_hat) %>%
+    rename(profit_gam = profit_hat)
+ 
+
+prof_res$yield_gam <- gam_res$yield_gam
+prof_res$n_rate_gam <- gam_res$n_rate_gam
+prof_res$profit_gam  <- gam_res$profit_gam
+
+
+
+  min_max_seq <-seq( 160, 250,by=0.5 ) 
+  
+  min_max_dat<-data.frame(min_max_seq)
+  
+  # prof_res$year <- as.numeric(prof_res$year)
+  # prof_res$year <- as.factor(prof_res$year)
+  
+  yield_res_comp_3 <- ggplot( prof_res%>%filter(field_id==3 & year==2021))+
+ geom_line(aes(y=yield_gam,x=n_rate_gam,group=year, colour=year),size=0.8)+
+geom_line(aes(y=yield_train,x=n_rate_train,group=year, colour=year),size=0.8,linetype="dashed")+
+     scale_color_manual(values=c("2021"='black'))+
+    ylim(205,230)+
+  geom_abline(data= min_max_dat, intercept=min_max_seq[c(64,77)],slope=0.121,size=0.4,color='purple')+
+    geom_abline(data= min_max_dat, intercept=min_max_seq[c(83,97)],slope=0.073,size=0.4,color='brown')+
+  geom_point(x=200,y=215.5,color='purple')+
+  geom_text( x = 215, y = 214, label =expression("N*"~(eta [i]~",0.121") ~"= 200") , size=3,color='purple')+
+  geom_point(x=202,y=222.5,color='purple')+
+   geom_text( x = 195, y = 223.5, label = expression("N*"~(eta [-i]~",0.121")~"= 202"),size=3,color='purple')+
+    geom_point(x=205,y=216,color='brown')+
+   geom_text( x = 226, y = 215, label =expression("N*"~(eta [i]~",0.073") ~"= 205") , size=3,colour='brown')+
+  geom_point(x=240,y=225.5,color='brown')+
+  geom_text( x = 245, y = 226.5, label = expression("N*"~(eta [-i]~",0.073")~"= 240"),size=3,colour='brown')+
+  labs(x = 'Nitrogen (lbs/ac)', y='Estimated Yield (bu/ac)')+
+   theme(legend.position = "none") 
+
+ggsave("yield_res_comp_3",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 5, device='pdf', dpi=300)
+
+
+
+  yield_res_comp_6 <- ggplot( prof_res%>%filter(field_id==6))+
+ geom_line(aes(y=yield_gam,x=n_rate_gam,group=year, colour=year),size=0.8)+
+geom_line(aes(y=yield_train,x=n_rate_train,group=year, colour=year),size=0.8,linetype="dashed")+
+     scale_color_manual(values=c("2017"="red","2021"='black'))+
+  labs(x = 'Nitrogen (lbs/ac)', y='Estimated Yield (bu/ac)')
+ #  +
+  # geom_abline(data= min_max_dat, intercept=min_max_seq[c(64,77)],slope=0.121,size=0.4,color='black')+
+  #   geom_abline(data= min_max_dat, intercept=min_max_seq[c(83,97)],slope=0.073,size=0.4,color='brown')+
+  # geom_point(x=200,y=215.5,color='black')+
+  # geom_text( x = 200, y = 213, label =expression("N*"~(eta [i]~",0.121") ~"= 200") , size=3)+
+  # geom_point(x=202,y=222.5,color='black')+
+  #  geom_text( x = 199, y = 226, label = expression("N*"~(eta [-i]~",0.121")~"= 202"),size=3)+
+  #   geom_point(x=205,y=216,color='brown')+
+  #  geom_text( x = 228, y = 215, label =expression("N*"~(eta [i]~",0.073") ~"= 205") , size=3,colour='brown')+
+  # geom_point(x=240,y=225.5,color='brown')+
+  # geom_text( x = 250, y = 230, label = expression("N*"~(eta [-i]~",0.073")~"= 240"),size=3,colour='brown')+
+  # labs(x = 'Nitrogen (lbs/ac)', y='Estimated Yield (bu/ac)')
+
+ggsave("yield_res_comp_6",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 7, device='pdf', dpi=300)
+
+
+  yield_res_comp_7 <- ggplot( prof_res%>%filter(field_id==7))+
+ geom_line(aes(y=yield_gam,x=n_rate_gam,group=year, colour=year),size=0.8)+
+geom_line(aes(y=yield_train,x=n_rate_train,group=year, colour=year),size=0.8,linetype="dashed")+
+     scale_color_manual(values=c("2017"="red","2021"='black'))+
+  labs(x = 'Nitrogen (lbs/ac)', y='Estimated Yield (bu/ac)')
+ #  +
+ggsave("yield_res_comp_7",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 7, device='pdf', dpi=300)
+  
+
+
+  yield_res_comp_8 <- ggplot( prof_res%>%filter(field_id==8))+
+ geom_line(aes(y=yield_gam,x=n_rate_gam,group=year, colour=year),size=0.8)+
+geom_line(aes(y=yield_train,x=n_rate_train,group=year, colour=year),size=0.8,linetype="dashed")+
+     scale_color_manual(values=c("2017"="red","2019"="blue","2021"='black'))+
+  labs(x = 'Nitrogen (lbs/ac)', y='Estimated Yield (bu/ac)') +
+       scale_color_manual(values=c("2017"="red","2019"="blue","2021"='black'))
+  
+
+
+ggsave("yield_res_comp_8",path ='/Users/hwangjaeseok/Desktop/2YP Revision', width = 5, height = 7, device='pdf', dpi=300)
+
+
+```
+
+
+
+
+
+
+
+
+
+
