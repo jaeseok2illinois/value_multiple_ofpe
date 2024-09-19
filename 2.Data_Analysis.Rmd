@@ -1,0 +1,1005 @@
+
+
+---
+title: "Data_analysis_"
+author: "Jaeseok Hwang"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+
+## Set up
+
+
+```{r, cache = F, echo = F, results = "hide"}
+#####
+
+library(knitr)
+
+knitr::opts_chunk$set(
+  cache = FALSE,
+  echo = FALSE,
+  warning = FALSE,
+  cache.lazy = FALSE,
+  fig.retina = 6,
+  fig.height = 9,
+  fig.width = 9,
+  message = FALSE,
+  error = TRUE
+)
+
+options(knitr.duplicate.label = "allow")
+
+```
+
+```{r colors and table width, cache = TRUE, results = "hide"}
+
+colorize <- function(x, color) {
+  if (knitr::is_latex_output()) {
+    sprintf("\\textcolor{%s}{%s}", color, x)
+  } else if (knitr::is_html_output()) {
+    sprintf("<span style='color: %s;'>%s</span>", color,
+      x)
+  } else x
+}
+
+FitFlextableToPage <- function(ft, pgwidth = 6){
+
+  ft_out <- ft %>% autofit()
+
+  ft_out <- width(ft_out, width = dim(ft_out)$widths*pgwidth /(flextable_dim(ft_out)$widths))
+  return(ft_out)
+}
+
+```
+
+#### Packages 
+
+```{r pacakages, cache = FALSE, results = "hide"}
+
+library(here)
+library(sf)
+library(ggplot2)
+library(tmap)
+library(ggcorrplot)
+library(patchwork)
+library(flextable)
+library(officer)
+library(parallel)
+library(tidyverse)
+library(dplyr)
+library(corrplot)
+library(data.table)
+library(GWmodel)
+library(ggridges)
+library(vtable)
+library(mgcv)
+library(caret)  
+library(e1071)  
+library(DiagrammeR)
+library(grf)
+library(gstat)
+library(viridis)
+library(elevatr)
+library(spatialEco)
+library(terra)
+library(stars)
+library(stats)
+library(base)
+library(stringr)
+library(FedData)
+library(soilDB)
+library(raster)
+library(automap)
+library(exactextractr)
+library(R.utils)
+library(GWmodel)
+library(purrr)
+library(magrittr)
+library(gridExtra)
+
+
+
+```
+
+
+
+```{r preparations, cache = T, results = "hide"}
+ 
+### Working directory and data directory
+grower_path <- "/Users/jaeseokhwang/Library/CloudStorage/Box-Box/DIFM_HQ/Data/Growers/"
+code_path <- "/Users/jaeseokhwang/Library/CloudStorage/Box-Box/DIFM_HQ/Codes/DIFM/"
+comdat_path <-  "/Users/jaeseokhwang/Library/CloudStorage/Box-Box/DIFM_HQ/Data/CommonData/"
+value_ofpe_git <- "/Users/jaeseokhwang/Desktop/DIFM/value_multiple_ofpe/"
+  
+# Read functions and RMD files
+
+source(here("Codes","prepare","prepare.R"))
+ 
+ 
+
+```
+
+```{r map-layout, cache = TRUE, results = "hide"}
+tm_layout_to_add <- tm_layout(
+  legend.outside = "TRUE",
+  frame = FALSE,
+  legend.title.size = 2,
+  legend.text.size = 1.5
+)
+```
+
+
+```{r anal functions, cache = TRUE, results = "hide"}
+
+## Field variables used for GAM regression analysis 
+field_vars <- c('s_rate','elev','slope','curv','tpi', 'clay', 'sand', 
+                         'silt', 'water_storage')
+ 
+
+
+   
+   
+```
+ 
+
+
+```{r data sort for combined analysis, cache = T, results = "hide"}
+ 
+
+# Load the data
+comb_dat_list <- readRDS(here("Data/combined_dat_list_0827_24.Rds"))
+
+# Define the function to rename variables and add 'ffy' variable
+process_df <- function(df) {
+  if (is.data.frame(df)) {
+    # Rename variables
+    names(df) <- gsub("seed_rate", "s_rate", names(df))
+    names(df) <- gsub("nh3_rate|urea_rate|uan28_rate|uan32_rate", "n_rate", names(df))
+    names(df) <- gsub("elevation", "elev", names(df))
+    
+    # Define required variables and additional variables
+    required_vars <- c("yield", "s_rate", "n_rate", "elev", "slope", "curv", "tpi", "clay", "sand", "silt", "water_storage")
+    additional_vars <- c("farm", "field", "year")
+    vars_to_keep <- union(required_vars, additional_vars)
+    
+    # Subset variables and add 'ffy'
+    df <- df[ , names(df) %in% vars_to_keep, drop = FALSE]
+    if (all(c("farm", "field", "year") %in% names(df))) {
+      df$ffy <- paste(df$farm, df$field, df$year, sep = "_")
+    }
+  }
+  return(df)
+}
+
+# Apply the function to each element in comb_dat_list
+comb_dat_list_processed <- lapply(comb_dat_list, process_df)
+
+# Define the function to check for required variables
+has_required_vars <- function(df) {
+  if (is.data.frame(df)) {
+    required_vars <- c("yield", "s_rate", "n_rate", "elev", "slope", "curv", "tpi", "clay", "sand", "silt", "water_storage")
+    return(all(required_vars %in% names(df)))
+  }
+  return(FALSE)
+}
+
+# Filter the list to include only data frames with all required variables
+comb_dat_list_sort <- Filter(has_required_vars, comb_dat_list_processed)
+
+# Print the number of sorted data frames
+num_sorted <- length(comb_dat_list_sort)
+print(num_sorted)
+
+
+daymet_t_list <-readRDS(here("Data","daymet_t_list_0904_24.rds"))
+daymet_30_list <-readRDS(here("Data","daymet_30_list_0904_24.rds"))
+
+### Now need to add daymet (precipitation and gdd)
+
+daymet_t_bind <- bind_rows(daymet_t_list)
+
+# Convert daymet_t_bind to a named list for easier lookup
+daymet_lookup <- setNames(
+  split(daymet_t_bind[, c("prcp_tot", "gdd_tot")], daymet_t_bind$ffy),
+  daymet_t_bind$ffy
+)
+
+# Function to update each element in comb_dat_list_processed
+update_element <- function(element) {
+  ffy <- unique(element$ffy)
+  if (ffy %in% names(daymet_lookup)) {
+    # Add prcp_tot and gdd_tot to the element
+    element$prcp_tot <- rep(daymet_lookup[[ffy]]["prcp_tot"],nrow(element))
+    element$gdd_tot <- rep(daymet_lookup[[ffy]]["gdd_tot"],nrow(element))
+  }
+  return(element)
+}
+
+# Apply the function to each element in the list
+comb_dat_daymet <- lapply(comb_dat_list_sort, update_element)
+
+
+```
+```{r xgboost and random forest and causal forest to predict field -i , cache = T, results = "hide"}
+ 
+
+# Load necessary libraries
+library(xgboost)
+library(randomForest)
+library(grf)
+library(caret)
+library(dplyr)
+library(mgcv)
+
+###### combine list data and add weather variables ( gdd_tot, prcp_tot)
+ 
+ comb_day_df <- comb_dat_daymet %>% 
+                     bind_rows() %>% 
+                  mutate(farm_id =  as.numeric(factor(farm)))  %>% 
+                    mutate(gdd_tot =unlist(gdd_tot$gdd_tot),
+                             prcp_tot = unlist(prcp_tot$prcp_tot))
+
+ 
+ 
+predict_yield_response <- function(field_index, comb_day_df) {
+  # Split data into training and test sets
+  test_data <- comb_day_df %>% filter(field == field_index) %>%
+              na.omit() %>% st_drop_geometry()
+  train_data <- comb_day_df %>% filter(field != field_index) %>%
+              na.omit() %>% st_drop_geometry()
+  
+  # Ensure relevant columns are present
+  relevant_columns <- c("yield", "s_rate", "n_rate", "elev", "slope", "curv", "tpi", "clay", 
+                        "sand", "silt", "water_storage", "farm_id","prcp_tot","gdd_tot" )
+  
+  # Prepare training and test matrices
+  X_train <- train_data %>%
+    dplyr::select(all_of(relevant_columns)) %>%
+    dplyr::select(-c(yield))  # Exclude the target variable 'yield'
+  
+  X_test <- test_data %>%
+    dplyr::select(all_of(relevant_columns)) %>%
+    dplyr::select(-c(yield))  # Exclude the target variable 'yield'
+  
+  y_train <- train_data$yield
+  treatment <- train_data$n_rate
+  
+  # Split the training data into train and validation sets
+  set.seed(123)
+  trainIndex <- createDataPartition(y_train, p = 0.8, list = FALSE)
+  
+  X_train_subset <- X_train[trainIndex, ]
+  y_train_subset <- y_train[trainIndex]
+  treatment_subset <- treatment[trainIndex]  # Subset the treatment variable
+
+  X_valid <- X_train[-trainIndex, ]
+  y_valid <- y_train[-trainIndex]
+  
+  # Convert training and validation sets into DMatrix (used by XGBoost)
+  dtrain <- xgb.DMatrix(data = as.matrix(X_train_subset), label = y_train_subset)
+  dvalid <- xgb.DMatrix(data = as.matrix(X_valid), label = y_valid)
+  dtest <- xgb.DMatrix(data = as.matrix(X_test))
+ 
+  # Hyperparameter tuning for XGBoost (manual setup)
+  param <- list(
+    booster = "gbtree",
+    objective = "reg:squarederror",  # Objective for regression
+    eta = 0.1,  # Learning rate
+    max_depth = 6,
+    gamma = 0,
+    min_child_weight = 1,
+    subsample = 0.7,
+    colsample_bytree = 0.7
+  )
+  
+  # Train the XGBoost model
+  watchlist <- list(train = dtrain, eval = dvalid)
+  
+  xgb_model <- xgb.train(
+    params = param,
+    data = dtrain,
+    nrounds = 150,
+    watchlist = watchlist,
+    early_stopping_rounds = 10,
+    print_every_n = 10,
+    maximize = FALSE
+  )
+  
+  # Make predictions using the XGBoost model
+  xgb_preds <- predict(xgb_model, dtest)
+  
+  # Train the Random Forest model using caret
+  rf_grid <- expand.grid(
+    mtry = c(2, 4, 6, 8, 10)  # mtry must be defined for Random Forest
+  )
+  
+  train_control <- trainControl(
+    method = "cv",
+    number = 5,
+    verboseIter = TRUE,
+    allowParallel = TRUE
+  )
+  
+  rf_model <- train(
+    x = as.matrix(X_train_subset),
+    y = y_train_subset,
+    method = "rf",
+    trControl = train_control,
+    tuneGrid = rf_grid,
+    ntree = 100
+  )
+  
+  rf_preds <- predict(rf_model, as.matrix(X_test))
+  
+  # Train and predict using Continuous Causal Forests
+  treatment <- train_data$n_rate
+  test_treatment <- test_data$n_rate
+  
+  causal_forest <- causal_forest(
+    X = as.matrix(X_train_subset),
+    Y = y_train_subset,
+    W = treatment_subset
+  )
+  
+  causal_preds <- predict(causal_forest, newdata = as.matrix(X_test))$predictions
+
+  
+  average_yield <- mean(y_train_subset)
+
+ # Adjust the causal forest predictions to represent actual yield levels
+  adjusted_causal_preds <- causal_preds + average_yield
+
+
+  # Prepare data for GAM regression and plotting
+test_n_rate <- test_data$n_rate
+
+results_df <- data.frame(
+  n_rate = test_n_rate,
+  xgb_yield = xgb_preds,
+  rf_yield = rf_preds,
+  cf_yield = adjusted_causal_preds,
+  ofpe_yield = test_data$yield # Use the adjusted predictions
+)
+
+  
+  # Specify the formula for the GAM
+  field_vars <- colnames(X_train_subset)[!colnames(X_train_subset) %in% c("prcp_tot","gdd_tot","n_rate",
+                                                                          "s_rate",
+                                                                          "farm_id")]
+  formula_xgb<- paste0(
+    "xgb_yield ~ s(n_rate, k = 3) + s(s_rate, k = 3)", 
+    paste0(" + ", paste0(field_vars, collapse = " + "))
+  ) %>% formula()
+  
+   formula_rf<- paste0(
+    "rf_yield ~ s(n_rate, k = 3) + s(s_rate, k = 3)", 
+    paste0(" + ", paste0(field_vars, collapse = " + "))
+  ) %>% formula()
+   
+    formula_cf<- paste0(
+    "cf_yield ~ s(n_rate, k = 3) + s(s_rate, k = 3)", 
+    paste0(" + ", paste0(field_vars, collapse = " + "))
+  ) %>% formula()
+
+     formula_ofpe<- paste0(
+    "ofpe_yield ~ s(n_rate, k = 3) + s(s_rate, k = 3) ", 
+    paste0(" + ", paste0(field_vars, collapse = " + "))
+  ) %>% formula()
+     
+  #### 
+  gam_data <- test_data %>% 
+             dplyr::select(c(yield,s_rate,n_rate,all_of(field_vars)))%>%
+           mutate(
+             xgb_yield =  xgb_preds,
+             rf_yield = rf_preds,
+             cf_yield = adjusted_causal_preds,
+             ofpe_yield = yield
+          )
+    gam_fit_dat <-test_data %>%dplyr::select(c(s_rate,all_of(field_vars)))
+  # Fit GAM models for each predicted yield
+gam_xgb <- gam(formula_xgb, data =  gam_data)
+gam_rf <- gam(formula_rf, data =  gam_data)
+gam_cf <- gam(formula_cf, data =  gam_data)
+gam_ofpe <- gam(formula_ofpe, data =  gam_data)
+  # Generate fitted values for plotting
+
+ gam_for_eval <- gam_fit_dat %>%
+  summarise(across(everything(), mean, na.rm = TRUE))
+    
+ eval_data <- test_data %>%
+  dplyr::select(n_rate) %>%
+  bind_cols(replicate(nrow(gam_for_eval), gam_for_eval, simplify = FALSE))
+  
+  results_df$xgb_fitted <- predict(gam_xgb, newdata =  eval_data  )
+  results_df$rf_fitted <- predict(gam_rf, newdata =  eval_data )
+  results_df$cf_fitted <- predict(gam_cf, newdata =  eval_data )
+   results_df$ofpe_fitted <- predict(gam_ofpe, newdata =  eval_data )
+ 
+  # Plot the GAM fits
+  ggplot(results_df, aes(x = n_rate)) +
+    geom_point(aes(y = xgb_yield, color = "XGBoost")) +
+    geom_point(aes(y = rf_yield, color = "Random Forest")) +
+    geom_point(aes(y = cf_yield, color = "Causal Forest")) +
+      geom_point(aes(y = ofpe_yield, color = "OFPE Yield")) +
+  
+    geom_line(aes(y = xgb_fitted, color = "XGBoost (GAM fit)")) +
+    geom_line(aes(y = rf_fitted, color = "Random Forest (GAM fit)")) +
+    geom_line(aes(y = cf_fitted, color = "Causal Forest (GAM fit)")) +
+     geom_line(aes(y = ofpe_fitted, color = "OFPE (GAM fit)")) +
+   
+    labs(title = "Yield N Responses (GAM Fit)",
+         x = "N Rate",
+         y = "Predicted (XGB,RF,CF) and Observed (OFPE) Yield",
+         color = "Model") +
+    theme_minimal()
+  
+
+  return(list(
+    gam_xgb = gam_xgb,
+    gam_rf = gam_rf,
+    gam_cf = gam_cf,
+    gam_ofpe = gam_ofpe,
+    plot = last_plot()
+  ))
+}
+
+# Example usage
+field_index <- unique(comb_day_df$field)[1] # Character field identifier
+
+# Record the start time
+start_time <- Sys.time()
+
+predictions <- predict_yield_response(field_index, comb_day_df)
+
+# Record the end time
+end_time <- Sys.time()
+
+time_taken <- end_time - start_time
+
+# Print the time taken
+print(time_taken)
+
+library(doParallel)
+library(parallel)
+library(xgboost)
+library(caret)
+library(grf)
+
+predict_yield_response <- function(field_index, comb_day_df) {
+  # Set up parallel backend
+  num_cores <- detectCores() - 1  # Leave one core free
+  cl <- makeCluster(num_cores)
+  registerDoParallel(cl)
+  
+  print(paste("Using", num_cores, "cores for parallel processing"))
+
+  # Split data into training and test sets
+  test_data <- comb_day_df %>% filter(field == field_index) %>%
+    na.omit() %>% st_drop_geometry()
+  train_data <- comb_day_df %>% filter(field != field_index) %>%
+    na.omit() %>% st_drop_geometry()
+
+  # Ensure relevant columns are present
+  relevant_columns <- c("yield", "s_rate", "n_rate", "elev", "slope", "curv", "tpi", "clay", 
+                        "sand", "silt", "water_storage", "farm_id","prcp_tot","gdd_tot")
+
+  # Prepare training and test matrices
+  X_train <- train_data %>%
+    dplyr::select(all_of(relevant_columns)) %>%
+    dplyr::select(-c(yield))  # Exclude the target variable 'yield'
+
+  X_test <- test_data %>%
+    dplyr::select(all_of(relevant_columns)) %>%
+    dplyr::select(-c(yield))  # Exclude the target variable 'yield'
+
+  y_train <- train_data$yield
+  treatment <- train_data$n_rate
+
+  # Split the training data into train and validation sets
+  set.seed(123)
+  trainIndex <- createDataPartition(y_train, p = 0.8, list = FALSE)
+
+  X_train_subset <- X_train[trainIndex, ]
+  y_train_subset <- y_train[trainIndex]
+  treatment_subset <- treatment[trainIndex]  # Subset the treatment variable
+
+  X_valid <- X_train[-trainIndex, ]
+  y_valid <- y_train[-trainIndex]
+
+  # Convert training and validation sets into DMatrix (used by XGBoost)
+  dtrain <- xgb.DMatrix(data = as.matrix(X_train_subset), label = y_train_subset)
+  dvalid <- xgb.DMatrix(data = as.matrix(X_valid), label = y_valid)
+  dtest <- xgb.DMatrix(data = as.matrix(X_test))
+
+  # Hyperparameter tuning for XGBoost (manual setup with parallelization)
+  param <- list(
+    booster = "gbtree",
+    objective = "reg:squarederror",  # Objective for regression
+    eta = 0.1,  # Learning rate
+    max_depth = 6,
+    gamma = 0,
+    min_child_weight = 1,
+    subsample = 0.7,
+    colsample_bytree = 0.7,
+    nthread = num_cores  # Parallelization
+  )
+
+  # Train the XGBoost model
+  watchlist <- list(train = dtrain, eval = dvalid)
+  
+  xgb_model <- xgb.train(
+    params = param,
+    data = dtrain,
+    nrounds = 150,
+    watchlist = watchlist,
+    early_stopping_rounds = 10,
+    print_every_n = 10,
+    maximize = FALSE
+  )
+
+  # Make predictions using the XGBoost model
+  xgb_preds <- predict(xgb_model, dtest)
+
+  # Train the Random Forest model using caret with parallelization
+  rf_grid <- expand.grid(
+    mtry = c(2, 4, 6, 8, 10)  # mtry must be defined for Random Forest
+  )
+
+  train_control <- trainControl(
+    method = "cv",
+    number = 5,
+    verboseIter = TRUE,
+    allowParallel = TRUE  # Enables parallel processing
+  )
+
+  rf_model <- train(
+    x = as.matrix(X_train_subset),
+    y = y_train_subset,
+    method = "rf",
+    trControl = train_control,
+    tuneGrid = rf_grid,
+    ntree = 100
+  )
+
+  rf_preds <- predict(rf_model, as.matrix(X_test))
+
+  # Train and predict using Continuous Causal Forest with parallelization
+  set.num.threads(num_cores)  # Set threads for causal forest
+
+  causal_forest <- causal_forest(
+    X = as.matrix(X_train_subset),
+    Y = y_train_subset,
+    W = treatment_subset
+  )
+
+  causal_preds <- predict(causal_forest, newdata = as.matrix(X_test))$predictions
+
+  average_yield <- mean(y_train_subset)
+
+  # Adjust the causal forest predictions to represent actual yield levels
+  adjusted_causal_preds <- causal_preds + average_yield
+
+  # Prepare data for GAM regression and plotting
+  test_n_rate <- test_data$n_rate
+  results_df <- data.frame(
+    n_rate = test_n_rate,
+    xgb_yield = xgb_preds,
+    rf_yield = rf_preds,
+    cf_yield = adjusted_causal_preds,
+    ofpe_yield = test_data$yield
+  )
+
+  # (Rest of your code for GAM fitting and plotting remains unchanged...)
+
+  # Shutdown the parallel cluster after the task is done
+  stopCluster(cl)
+  registerDoSEQ()  # Deregister parallel backend
+
+  return(list(
+    gam_xgb = gam_xgb,
+    gam_rf = gam_rf,
+    gam_cf = gam_cf,
+    gam_ofpe = gam_ofpe,
+    plot = last_plot()
+  ))
+}
+
+# Example usage
+field_index <- unique(comb_day_df$field)[2]  # Character field identifier
+
+# Record the start time
+start_time <- Sys.time()
+
+predictions <- predict_yield_response(field_index, comb_day_df)
+
+# Record the end time
+end_time <- Sys.time()
+
+
+```
+
+
+```{r analysis GAM, cache = T, results = "hide"}
+ 
+
+crop_price <-  5.5
+s_price <- 3.81
+n_price <- 0.84
+
+
+data_anal_list <- eval_data_list <- status_quo_list <- analysis_res_list <- list()
+
+
+for ( i in 1:length(comb_dat_list )){
+ 
+    ffy <- data_sf <- trial_info <- soils_sf <- soils_dat <-soils_soils <- soils_names <- ssurgo <- NULL
+   
+    dem  <- dem_slope <- dem_aspect <- dem_curv <-dem_tpi <- topo_dem <- topo_values <- data_mu <- final_data <- NULL
+    
+    trial_info <- NULL
+    
+     data_sf <-  comb_dat_list[i] %>%
+            cbind(., st_coordinates(st_centroid(.))) %>%
+            st_transform(4326)
+
+  
+    vars_to_select <- c("yield", "s_rate", "n_rate", "elev","slope","curv","tpi","clay","sand","silt","water_storage","X","Y")
+   
+      
+    data_sf <- data_sf %>% dplyr::select(any_of(vars_to_select))
+   
+   
+       if(!is.null(data_sf)){
+  source(paste0(corn_seed_git,"unpack_field_parameters.R"))
+    }
+    
+
+      if(!is.null(data_sf$s_rate)){
+          trial_info <- trial_info %>%
+    mutate(input_type = case_when(
+        input_type == "seed" ~ "S",
+        input_type %in% c("urea", "uan32", "uan24", "NH3","uan28") ~ "N",
+        TRUE ~ input_type
+    )) %>% filter(input_type == "S")
+        
+   data_sf <- data_sf %>%
+     mutate(obs_id = seq(nrow(data_sf)))  
+   
+   
+   if(is.null(data_sf$n_rate)){
+     data_sf <- data_sf %>% mutate(n_rate = 1)
+   }
+
+ 
+   analysis_res_g <- trial_info %>%
+#  left_join(crop_prices, by = "crop") %>%
+      mutate(data = map(rep(1, n()), ~data_sf)) %>%
+#  mutate(data = rep(list(data_sf), nrow(.)))) %>%
+  rowwise() %>%
+  mutate(
+    data = list(
+      setnames(
+        data.table::copy(data),
+        paste0(tolower(input_type), "_rate"),
+        "input_rate"
+      )
+    )
+  ) %>%
+  mutate(
+    field_vars = list(
+      field_vars
+    )
+  ) %>%
+  mutate(
+    data = list(
+      gen_y_res(data, field_vars)
+    )
+  ) %>%
+  mutate(
+    data = list(
+      run_gwr(subset(data, input_rate != 0), "input_rate")
+    )
+  )
+
+
+   analysis_res_m <- analysis_res_g %>%
+  mutate(
+    data = list(
+      define_mz(
+        data = data,
+        max_num_zones = 1,
+        min_obs = 300
+      )
+    )
+  )
+
+analysis_res_gam <- analysis_res_m %>%
+  mutate(gam_res = list(
+    run_scam_gam(data = data, field_vars = field_vars)
+  ))
+
+
+
+analysis_res_e <- analysis_res_gam %>%
+  #=== single average observation by zone ===#
+  mutate(data_for_eval = list(
+    make_data_for_eval(
+      data = data,
+      est = gam_res
+    )
+  )) %>%
+  #=== input rate sequence by zone to be tested ===#
+  mutate(input_rate_seq = list(
+    data.table(data)[, .(
+      input_rate = seq(
+        quantile(input_rate, 0.025),
+        quantile(input_rate, 0.975),
+        length = 100
+      )
+    ),
+    by = zone_txt]
+  )) %>%
+  #=== predict yield values at different input rates ===#
+  mutate(eval_data = list(
+    predict_yield_range(
+      data_for_eval = data_for_eval,
+      input_rate_seq = input_rate_seq,
+      est = gam_res
+    ) %>%
+    .[, type := "opt_v"]%>%
+    .[, .(
+      input_rate, zone_txt, type, yield_hat, yield_hat_se
+    )]
+  )) %>%
+  #=== Adjust yield values to match up with actual yields (this is purely for figures below) ===#
+  mutate(
+    #=== mean predicted yield ===#
+    mean_yield_hat_opt =
+    list(
+      eval_data[, .(mean_yield_hat = mean(yield_hat)), by = zone_txt]
+    ),
+    #=== mean actual yield by zone ===#
+    mean_yield_actual =
+    list(
+      data.table(data)[,
+      .(mean_yield_actual = mean(yield)),
+      by = zone_txt
+      ]
+    ),
+    #=== shift yield so that figures look ===#
+    yield_shift_opt =
+    list(
+      mean_yield_actual[mean_yield_hat_opt, on = "zone_txt"] %>%
+        .[, yield_shift :=  mean_yield_actual - mean_yield_hat] %>%
+        .[, .(zone_txt, yield_shift)]
+    ),
+    eval_data =
+    list(
+      eval_data %>%
+      yield_shift_opt[., on = "zone_txt"] %>%
+      .[, yield_hat := yield_hat + yield_shift] %>%
+      .[, profit_hat := crop_price * yield_hat - input_price * input_rate] %>%
+      .[, profit_hat_se := crop_price * yield_hat_se]
+    )
+  ) %>%
+  dplyr::select(
+    - mean_yield_hat_opt,
+    - yield_shift_opt,
+    - mean_yield_actual
+  ) %>%
+  mutate(opt_input_data = list(
+   opt_input_data <- eval_data %>%
+    .[, .SD[profit_hat == max(profit_hat), ], by = zone_txt] %>%
+    setnames("input_rate", "opt_input")
+  )) %>%
+  #=== assign optimal variable input rate to the data ===#
+  mutate(data = list(
+    left_join(
+      data,
+      opt_input_data,
+      by = "zone_txt"
+    )
+  ))
+
+} else{
+        data_sf <- NULL
+        analysis_res_e <- NULL    
+}
+
+
+data_anal_list[[i]] <- data_sf
+status_quo_list[[i]] <- analysis_res_e$gc_rate
+eval_data_list[[i]] <- analysis_res_e$eval_data
+analysis_res_list[[i]] <- analysis_res_e
+
+}
+      
+
+saveRDS(eval_data_list, here("Data","eval_data_list.rds"))
+
+saveRDS(data_anal_list,here("Data","data_anal_list.rds"))
+
+saveRDS(status_quo_list,here("Data","status_quo_list.rds"))
+
+saveRDS(analysis_res_list,here("Data","analysis_res_list.rds"))
+
+```
+
+
+```{r usda combine, echo = T}
+
+### Gam Regression results with feeding data and yield response curve
+
+eval_data_list <- readRDS(here("Data","eval_data_list.rds"))
+
+### farmer's status qou seed list
+status_quo_list <-readRDS(here("Data","status_quo_list.rds"))
+
+### cleaned data list
+data_anal_list <- readRDS(here("Data","data_anal_list.rds"))
+
+### in-season climate data list
+daymet_list <-readRDS(here("Data","daymet_list.rds"))
+
+
+
+#### Extract ffy column vector
+ffy_comb <- c()
+
+for(i in 1:length(data_anal_list)){
+ffy_comb[i] <-unique(data_anal_list[[i]]$exp_id)
+}
+
+#### Extract stq_s column vector
+
+
+stq_s_comb <-  rep(NA, length(status_quo_list))
+
+for ( i in seq_along(status_quo_list)){
+    if (!is.null(status_quo_llist[[i]])){
+      stq_s_comb[i] <- ifelse(status_quo_llist[[i]] >= 1000, status_quo_llist[[i]]/1000, status_quo_llist[[i]]) 
+}
+}
+
+
+opt_s_rate <- rep(NA, length(opt_list_s))
+yield_est_s <- rep(NA, length(opt_list_s))
+prof_est_s <- rep(NA, length(opt_list_s))
+
+##### Create the tibble data
+
+prof_scn <- tibble(
+  ffy = ffy_list,
+  stq_s = stq_s_comb,
+  eval_s = map(eval_dat_list_s, ~ .x[[1]]),
+  data_s = map(data_list_s, ~ .x),
+  weather = map(daymet_list_s, ~ .x)
+)
+
+prof_scn$X <- NA
+prof_scn$Y <- NA
+
+for(i in 1:nrow(prof_scn)){
+  if(!is.null(prof_scn$data_s[i][[1]])){
+  bbox <-prof_scn$data_s[i][[1]] %>% st_transform(4326) %>% st_bbox()
+   coords <- c((bbox[1]+bbox[3])/2 ,(bbox[2]+bbox[4])/2)
+   names(coords) = c('X','Y')
+   prof_scn$X[i] <- coords[1]
+   prof_scn$Y[i] <- coords[2]
+  } 
+}
+
+
+prof_scn <- as.data.table(prof_scn)
+
+# Loop through rows and update columns
+
+for (i in 1:nrow(prof_scn)) {
+  parts <- str_split(prof_scn$ffy[i], "_")[[1]]
+  prof_scn[i, c("farm", "field", "year") := list(parts[1], parts[2], as.numeric(parts[3]))]
+}
+
+
+### combine US state map data for USDASR combine ###
+
+us_map <-here(corn_seed_git,"us_map","cb_2018_us_county_500k.shp") %>% st_read() %>% st_transform(.,crs = "+proj=longlat +datum=WGS84")
+
+# Create tmap object
+ corn_fips <- c(17, 18, 19, 20, 21, 26, 27, 29, 31, 38, 39, 46, 55)
+
+us_map <- us_map %>% filter(STATEFP %in% corn_fips) %>% dplyr::select(STATEFP,COUNTYFP)
+
+state_name <- data.frame(
+  STATEFP = c("17", "18", "19", "20", "21", "26", "27", "29", "31", "38", "39", "46", "55"),
+  state_name = c("IL", "IN", "IA", "KS", "KY", "MI", "MN", "MO", "NE", "OH", "OK", "SD", "WI")
+)
+
+us_state <- merge(us_map, state_name, by = "STATEFP")
+
+prof_scn <- prof_scn_cleaned <- prof_scn %>%
+  filter(!is.na(stq_s))
+
+
+combined_sf <-  prof_scn %>% as.tibble()  %>% dplyr::select(ffy,X,Y)%>% 
+  st_as_sf(., coords = c("X", "Y")) %>% 
+            cbind(., st_coordinates(st_centroid(.)))
+
+st_crs(us_state )
+st_crs(combined_sf) <- st_crs(us_state )
+
+combined_us <-st_intersection(combined_sf,us_state)
+
+unmatched_rows <- which(!combined_sf$ffy %in% combined_us$ffy)
+
+est_scn <- prof_scn[-unmatched_rows,]
+
+
+for (i in 1:nrow(est_scn)) {
+  # Find the index where ffy matches
+  index <- which(combined_us$ffy == est_scn$ffy[i])
+  # If a match is found, update the state in est_scn
+  if (length(index) > 0) {
+    est_scn$state[i] <- combined_us$state_name[index]
+  }
+}
+
+
+plant_pop <-read.csv(here("usda_corn_plant_pop.csv"),header = T, skip = 1)
+
+colnames(plant_pop) <- c("state", "2023","2022","2021","2020","2019","2018","2017","2016")
+
+
+# Mapping of full state names to abbreviations
+state_abbreviations <- c(
+  "illinois" = "IL",
+  "indiana" = "IN",
+  "iowa" = "IA",
+  "kansas" = "KS",
+  "minnesota" = "MN",
+  "missouri" = "MO",
+  "nebraska" = "NE",
+  "ohio" = "OH",
+  "south dakata" = "SD", # Corrected typo
+  "wisconsin" = "WI"
+)
+
+# Replace full state names with abbreviations
+plant_pop$state <- state_abbreviations[plant_pop$state]
+plant_pop[11,] <- c( "OK", NA,NA,NA,NA,NA,NA,NA,NA) 
+
+
+# Assuming est_scn contains columns state and year
+# Initialize a vector to store the values
+usda_s_values <- numeric(nrow(est_scn))
+
+# Iterate over each row of est_scn
+for (i in 1:nrow(est_scn)) {
+  # Get the state and year from est_scn
+  state <- est_scn$state[i]
+  year <- est_scn$year[i]
+  
+  # Find the corresponding row in plant_pop
+  row_index <- which(plant_pop$state == state)
+  
+  # Find the corresponding column in plant_pop
+  col_index <- match(as.character(year), names(plant_pop))
+  
+  # Assign the value from plant_pop to usda_s_values
+  usda_s_values[i] <- plant_pop[row_index, col_index]
+}
+
+# Add usda_s to est_scn
+est_scn$usda_s <- as.numeric(usda_s_values)
+
+
+saveRDS(est_scn, here("Data", "anlaysis_daymet_usda.rds"))
+
+##### Now data is ready!!!!
+```
+
+
+

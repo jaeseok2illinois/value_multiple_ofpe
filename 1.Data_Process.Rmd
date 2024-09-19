@@ -1,0 +1,516 @@
+---
+title: "1.Data_Process"
+author: "Jaeseok Hwang"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: defaulta
+---
+
+
+## Set up
+
+
+```{r, cache = F, echo = F, results = "hide"}
+#####
+
+library(knitr)
+
+knitr::opts_chunk$set(
+  cache = FALSE,
+  echo = FALSE,
+  warning = FALSE,
+  cache.lazy = FALSE,
+  fig.retina = 6,
+  fig.height = 9,
+  fig.width = 9,
+  message = FALSE,
+  error = TRUE
+)
+
+options(knitr.duplicate.label = "allow")
+
+```
+
+```{r colors and table width, cache = TRUE, results = "hide"}
+
+colorize <- function(x, color) {
+  if (knitr::is_latex_output()) {
+    sprintf("\\textcolor{%s}{%s}", color, x)
+  } else if (knitr::is_html_output()) {
+    sprintf("<span style='color: %s;'>%s</span>", color,
+      x)
+  } else x
+}
+
+FitFlextableToPage <- function(ft, pgwidth = 6){
+
+  ft_out <- ft %>% autofit()
+
+  ft_out <- width(ft_out, width = dim(ft_out)$widths*pgwidth /(flextable_dim(ft_out)$widths))
+  return(ft_out)
+}
+
+```
+
+#### Packages 
+
+```{r pacakages, cache = FALSE, results = "hide"}
+
+library(here)
+library(sf)
+library(ggplot2)
+library(tmap)
+library(ggcorrplot)
+library(patchwork)
+library(flextable)
+library(officer)
+library(parallel)
+library(tidyverse)
+library(dplyr)
+library(corrplot)
+library(data.table)
+library(GWmodel)
+library(ggridges)
+library(vtable)
+library(mgcv)
+library(caret)  
+library(e1071)  
+library(DiagrammeR)
+library(grf)
+library(gstat)
+library(viridis)
+library(elevatr)
+library(spatialEco)
+library(terra)
+library(stars)
+library(stats)
+library(base)
+library(stringr)
+library(FedData)
+library(soilDB)
+library(raster)
+library(automap)
+library(exactextractr)
+library(R.utils)
+library(GWmodel)
+library(purrr)
+library(magrittr)
+library(gridExtra)
+
+
+
+```
+
+
+
+```{r preparations, cache = T, results = "hide"}
+ 
+### Working directory and data directory
+grower_path <- "/Users/jaeseokhwang/Library/CloudStorage/Box-Box/DIFM_HQ/Data/Growers/"
+code_path <- "/Users/jaeseokhwang/Library/CloudStorage/Box-Box/DIFM_HQ/Codes/DIFM/"
+comdat_path <-  "/Users/jaeseokhwang/Library/CloudStorage/Box-Box/DIFM_HQ/Data/CommonData/"
+corn_seed_git <- "/Users/jaeseokhwang/Desktop/DIFM/corn_seed_response/"
+  
+# Read functions and RMD files
+
+source(here("Codes","prepare.R"))
+ 
+ 
+
+```
+
+```{r map-layout, cache = TRUE, results = "hide"}
+tm_layout_to_add <- tm_layout(
+  legend.outside = "TRUE",
+  frame = FALSE,
+  legend.title.size = 2,
+  legend.text.size = 1.5
+)
+```
+
+
+```{r anal functions, cache = TRUE, results = "hide"}
+
+## Field variables used for GAM regression analysis 
+field_vars <- c('elev','slope','curv','tpi', 'clay', 'sand', 
+                         'silt', 'water_storage')
+ 
+
+
+   
+   
+```
+ 
+
+```{r, echo = T, results = "hide"}
+
+
+### Read the field trial information 
+
+field_data <- jsonlite::fromJSON(
+  file.path(paste0(comdat_path,"field_parameter.json")),
+  flatten = TRUE
+) %>%
+  data.table() %>%
+  .[, field_year := paste(farm, field, year, sep = "_")]
+
+#--- get the Corn trial data  ---#
+
+field_year_ls <- field_data[crop=="corn"]$field_year
+
+#### 210 corn trial folder ( August 27th ,2024)
+
+### Check the data process status by fields ####
+analysis_c <- c()
+
+for (i in 1:length(field_year_ls)) {
+  
+  ffy <- field_year_ls[i]
+  
+path <- paste0(grower_path, ffy)
+  
+  # Check if there exists anlaysis_data 
+ analysis_dt <- list.files(path = path, pattern = "analysis_data", ignore.case = TRUE, recursive = TRUE)
+ 
+   if (length(analysis_dt) > 0) {
+    # Store the matching files in the list
+    analysis_c[i] <- ffy
+   }
+}
+
+### Remove trials that does not contain analysis_data
+
+# 169 out of 210 have analysis data (August 27th 2024) 
+
+analysis_corn <- analysis_c[!is.na(analysis_c)]
+
+saveRDS(analysis_corn,here("Data","ffy_list_0828_24.rds"))
+
+```  
+
+
+```{r , echo = F, results = "hide"}
+
+### List of to be combined data
+
+comb_dat_list <- list()
+
+# Remove
+# "DuraClub_D09_2022"
+# "DuraClub_P1_2022"
+# "DuraClub_R37_2022"
+# "Lecture_Research_2023"
+# "Grandma_Grandma_2022"
+# "MoissonProsper_Field13_2023"
+# "FermeDeringerJs_Field14_2023"
+# "FermeDeringerJs_Field44_2023"
+# "FermeDeringerJs_Field31_2023"
+# "Braungardt_Shed_2023"
+# "Hamman_BostepoHBP1OuplaasCaMgOH_2024" 
+# "Hamman_BostepoHBP1IdwalaCaOH_2024"   
+# "Hamman_BostepoHBP1IdwalaCaO_2024"     "Hamman_BostepoHBP1MPGypdol_2024"     
+# "Hamman_BostepoHBP1MPCalProlime_2024"  "Hamman_BostepoHBP1MPDol_2024"        
+# "Hamman_BostepoHBP1Cao_2024"    
+
+# "Larson_EB2_2017" (manually add)
+
+for(i in 1:length(analysis_corn)){
+ 
+  ffy <- data_sf <- trial_info <- soils_sf <- soils_dat <-soils_soils <- soils_names <- ssurgo <- NULL
+  dem  <- dem_slope <- dem_aspect <- dem_curv <-dem_tpi <- topo_dem <- topo_values <- data_mu <- final_data <- NULL
+   
+  #### Choose trial field  information #####
+  
+  ffy <-  analysis_corn[i]
+  ### Open processed data #### 
+  
+  data_sf <- paste0(grower_path,ffy,"/Analysis-Ready/analysis_data.rds")%>%
+        readRDS() %>%
+          setnames(names(.), tolower(names(.))) %>%
+               st_transform(4326) 
+
+
+    data_sf <- data_sf %>%
+    rename_with(~   if_else(grepl("ec02", .), "ecs",
+                      if_else(grepl("yield_vol", .), "yield", .)))
+      
+     vars_to_select <- c("yield", "seed_rate", "s_rate", "n_rate", "uan32_rate", "nh3_rate", "uan28_rate", "urea_rate")
+
+   data_sf <- data_sf %>% dplyr::select(any_of(vars_to_select))
+  
+     vars_to_check <-  c( "seed_rate", "s_rate", "n_rate", "uan32_rate", "nh3_rate", "uan28_rate", "urea_rate")
+   
+      # Check if any of the selected variables are in data_sf
+  if (all(!vars_to_check %in% names(data_sf))) {
+    next  # Skip to the next iteration if none of the variables are present
+  }
+   
+boundary_file <- boundary_sf <- boundary_sp <-  NULL
+
+boundary_file <- paste0(grower_path,ffy,"/TrialDesign/boundary.shp") 
+    
+   td_file <-paste0(grower_path, ffy, "/TrialDesign") %>% 
+  list.files(full.names = TRUE) %>% 
+  .[str_detect(., "shp")] %>% 
+  .[str_detect(., "trial-design")] %>% 
+  #=== get the first one in case we have two separate files ===#
+  .[1]
+
+if (file.exists(boundary_file)) {
+  boundary_sf <- st_read(boundary_file) %>%
+  st_set_4326() %>%
+ #  st_transform_utm() %>%
+  st_bbox() %>%
+  st_as_sfc() %>%
+  st_as_sf()
+} else if (file.exists(td_file)) {
+  boundary_sf <- st_read(td_file) %>%
+  st_set_4326() %>%
+  st_bbox() %>%
+  st_as_sfc() %>%
+  st_as_sf()
+}
+   
+dem <- get_elev_raster(
+  boundary_sf,
+  clip = "locations",
+  z = 14
+)
+
+names(dem)<-'elev'
+
+
+dem_slope <- terrain(dem$elev, "slope", unit="degrees")
+
+dem_aspect <- terrain(dem$elev, "aspect", unit="degrees")
+
+dem_curv <- spatialEco::curvature(rast(dem), type="mcnab")  %>%
+  raster()
+
+names(dem_curv) <- "curv"
+
+dem_tpi <- terrain(dem, "tpi", unit="m")
+
+#--- Stack all the rasters together ---#
+topo_dem <- stack(dem, dem_slope, dem_aspect, dem_curv, dem_tpi) %>%
+  st_as_stars() %>%
+  split(3)
+
+
+### `get_ssurgo()` is defined in **functions_for_processing.R** 
+
+boundary_sp <- as(boundary_sf, "Spatial")
+
+
+#--- download SSURGO ---#
+vars <- c("sandtotal_r", "silttotal_r", "claytotal_r", "awc_r", "om_r", "dbovendry_r")
+
+ssurgo <- get_ssurgo_props(boundary_sp, vars = vars) 
+
+
+ssurgo <-ssurgo %>%
+  dplyr::select(c("mukey","musym","muname", "sandtotal_r", "silttotal_r", "claytotal_r", "awc_r"))%>% 
+  dplyr::rename(
+    "clay"="claytotal_r","sand"="sandtotal_r" , 
+    "silt"="silttotal_r", "water_storage"="awc_r")
+   
+topo_values <- topo_dem %>%
+  stars_to_stack() %>%
+  exact_extract(., st_transform(data_sf, st_crs(.))) %>%
+  rbindlist(idcol = "rowid") %>%
+  .[,
+    lapply(.SD, weighted.mean, w = coverage_fraction),
+    by = rowid, 
+    .SDcols = paste0("layer.", 1:length(topo_dem))
+  ] %>%
+  .[, rowid := NULL] %>%
+  setnames(names(.), names(topo_dem)) %>%
+  rename(elev= names(topo_dem[1]))
+
+
+data_sf <- cbind(data_sf, topo_values)
+
+
+### add ssurgo
+
+soils_sf <- ssurgo %>%st_transform(st_crs(data_sf))
+
+data_sf <- data_sf %>% mutate(yield_id = seq(nrow(data_sf)))
+
+
+soils_dat <- dplyr::select(data_sf, yield_id) %>%
+  st_intersection(., soils_sf) %>%
+  mutate(area = as.numeric(st_area(.))) %>%
+  data.table()
+
+
+soils_soils <- soils_dat %>%
+  .[, area_pct := area / sum(area), by = yield_id] %>%
+  .[,
+    lapply(.SD, weighted.mean, w =area_pct),
+    by = yield_id,
+    .SDcols = c("clay", "sand", "silt", "water_storage")
+  ]
+  
+data_sf <- left_join(data_sf, soils_soils)
+
+soils_names <- soils_dat %>% 
+  dplyr::select(yield_id, mukey, musym, muname, area) %>%
+  .[, area_pct := area / sum(area), by = yield_id] %>%
+  .[,
+    lapply(.SD, max, w = area_pct),
+    by = yield_id,
+    .SDcols = c("mukey","musym","muname")
+  ] %>% tidyr::separate(muname, into = c("muname", "muslope"), sep = ",") %>%
+    dplyr::rename("soil_name" = "muname")
+
+
+data_mu <-left_join(data_sf %>%
+                      dplyr::select(yield_id),
+                    soils_names)
+ 
+data_mu <- data_mu %>% 
+  mutate(area = as.numeric(st_area(.))) %>%
+  st_drop_geometry() %>% 
+  data.table() %>% 
+  .[, area_pct := area / sum(area), by = yield_id] %>% 
+  .[, area := NULL] %>% 
+  .[, lapply(.SD, function(x) x[which.max(area_pct)]), by = yield_id, .SDcols = names(.) %>% .[!str_detect(., c("area_pct|yield_id"))]]
+
+data_sf <- left_join (data_sf, data_mu, by='yield_id')
+
+
+ data_sf$farm  <- str_split(ffy, pattern='_')[[1]][1]
+ data_sf$field  <- str_split(ffy, pattern='_')[[1]][2]
+ data_sf$year  <- str_split(ffy, pattern='_')[[1]][3]
+ 
+ 
+ final_data <- data_sf  %>% dplyr::select(-yield_id)
+
+st_geometry(final_data) = "geometry"
+   
+comb_dat_list[[i]] <- final_data
+
+}
+
+# saveRDS(comb_dat_list,here("Data/combined_dat_list_0827_24.Rds"))
+
+comb_dat_list <-readRDS(here("Data/combined_dat_list_0827_24.Rds"))
+
+
+ffy_list <-readRDS("ffy_list_0828_24.rds") 
+
+
+
+
+library(daymetr)
+  
+day_to_month <- function(yday) {
+  # Define boundaries for each month
+  month_boundaries <- c(0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 366)
+  months <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+  
+  # Find the month index
+  month_index <- findInterval(yday, month_boundaries)
+  
+  # Return the corresponding month
+  return(months[month_index])
+}
+
+
+daymet_t_list <- list()
+daymet_30_list <- list()
+
+for ( i in 1:length(comb_dat_list)){
+
+  boundary_sf <- dat_sf <- year <-  daymet_y_m  <- temp_daymet <- daymet_y_m <- NULL
+    
+  
+   if (!is.null(comb_dat_list[[i]])) {
+     dat_sf <-  comb_dat_list[[i]] %>%
+            cbind(., st_coordinates(st_centroid(.))) %>%
+            st_transform(4326)
+ 
+ boundary_sf   <- dat_sf %>%
+    st_transform(4326) %>%
+ #  st_transform_utm() %>%
+  st_bbox() %>%
+  st_as_sfc() %>%
+  st_as_sf()
+   
+  centroid <- boundary_sf %>% 
+  st_centroid() %>% 
+  st_coordinates()
+
+
+ ffy_year <- as.numeric(unique(dat_sf$year))
+ # goes 20 years back from the current year
+
+temp_daymet <- download_daymet(
+    lat = centroid[1, "Y"],
+    lon = centroid[1, "X"],
+    start = 1993,
+    end = 2023
+  ) %>% 
+  .$data %>% 
+  data.table()
+
+
+### Extract heat and precipitation variables 
+#!!! Number of high heat days in growing season
+#!!! Average temperature by month
+#!!! Average precipitation by month
+
+# Define a function to convert day of year (yday) to month
+
+# Apply the function to create a new variable 'month'
+
+daymet_t_y <- temp_daymet %>%
+  filter(year ==ffy_year) %>%
+  rename(prcp = prcp..mm.day.) %>%
+  rename(tmax = tmax..deg.c.) %>%
+  rename(tmin = tmin..deg.c.) %>%
+  mutate(gdd = ifelse(tmax > 10, (tmax+tmin)*0.5-10, 0 )) %>%
+  mutate(gdd = pmax(gdd, 0)) %>%
+  dplyr::select(prcp, tmax, tmin, yday,gdd) %>%
+  mutate(month = day_to_month(yday)) %>%
+  filter(month %in% c('Apr','May','Jun','Jul','Aug','Sep')) %>% 
+  summarize(prcp_tot = sum(prcp, na.rm = TRUE),
+            gdd_tot = sum(gdd, na.rm = TRUE))%>%
+  mutate(ffy =  paste0(unique(dat_sf$farm),"_", unique(dat_sf$field),"_",unique(dat_sf$year))
+)
+
+daymet_30_y <- temp_daymet %>%
+  rename(prcp = prcp..mm.day.) %>%
+  rename(tmax = tmax..deg.c.) %>%
+  rename(tmin = tmin..deg.c.) %>%
+  mutate(gdd = ifelse(tmax > 10, (tmax+tmin)*0.5-10, 0 )) %>%
+  mutate(gdd = pmax(gdd, 0)) %>%
+  dplyr::select(prcp, tmax, tmin, yday,gdd,year) %>%
+  mutate(month = day_to_month(yday)) %>%
+  filter(month %in% c( 'Apr', 'May', 'Jun', 'Jul', 'Aug','Sep')) %>%
+  group_by(year) %>%
+  summarize(
+     prcp_30y = sum(prcp, na.rm = TRUE),
+    gdd_30y = sum(gdd, na.rm = TRUE))  %>%
+  mutate(ffy =  paste0(unique(dat_sf$farm),"_", unique(dat_sf$field),"_",unique(dat_sf$year))
+)
+
+  } else {
+    daymet_t_y <- NULL
+    daymet_30_y <-NULL
+  }
+  
+daymet_t_list[[i]] <- daymet_t_y
+daymet_30_list[[i]] <- daymet_30_y
+}
+
+
+saveRDS(daymet_t_list,here("Data","daymet_t_list_0904_24.rds"))
+saveRDS(daymet_30_list,here("Data","daymet_30_list_0904_24.rds"))
+
+
+
+```

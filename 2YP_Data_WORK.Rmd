@@ -1,0 +1,320 @@
+---
+title: "Run Analysis for A crop-type-here Experiment"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: true
+    number_sections: true
+---
+
+# Preparation
+
+## Set up
+
+```{r, cache = F, echo = F, results = "hide"}
+library(knitr)
+knitr::opts_chunk$set(
+  cache = FALSE,
+  echo = FALSE,
+  warning = FALSE,
+  cache.lazy = FALSE,
+  fig.retina = 6,
+  fig.height = 9,
+  fig.width = 9,
+  message = FALSE,
+  error = TRUE
+)
+
+options(knitr.duplicate.label = "allow")
+```
+
+```{r a02-pacakages, cache = FALSE}
+library(here)
+library(sf)
+library(ggplot2)
+library(tmap)
+library(ggcorrplot)
+library(patchwork)
+library(flextable)
+library(officer)
+library(parallel)
+library(tidyverse)
+library(corrplot)
+library(data.table)
+library(GWmodel)
+
+
+```
+
+
+```{r colors and table width, cache = TRUE}
+colorize <- function(x, color) {
+  if (knitr::is_latex_output()) {
+    sprintf("\\textcolor{%s}{%s}", color, x)
+  } else if (knitr::is_html_output()) {
+    sprintf("<span style='color: %s;'>%s</span>", color,
+      x)
+  } else x
+}
+
+FitFlextableToPage <- function(ft, pgwidth = 6){
+
+  ft_out <- ft %>% autofit()
+
+  ft_out <- width(ft_out, width = dim(ft_out)$widths*pgwidth /(flextable_dim(ft_out)$widths))
+  return(ft_out)
+}
+
+```
+
+## Parameters and functions
+
+```{r echo = F, results = "hide"}
+
+#--- working field-year ---#
+
+# "Bohnhoff_Adams_2020",
+
+field_n <- c("Campbell_Goldenrod_2021",
+"Chrz_42ac_2021", 
+"Gould_DamgaardWest_2021",  
+"GrigsbyGP_Field32_2021", 
+"Hord_F98_2021",
+"Hord_F104_2021",
+"Isermann_Florence80_2021",   
+"Nelson_DJWest_2021",
+"Nelson_Dougshome_2021",
+"Pistorius_SyfordNorthEast_2021",
+"Sasse_JensenWest_2021",     
+"Wendte_LaueLib80_2021",
+"Bohnhoff_Schormann_2020",
+"Gould_Maras_2020", "Hord_F17","Larson_BF2_2020",
+ "Nelson_Wirth_2020","Rohrscheib_AlmyMain_2020",
+ "Sasse_JensenEast_2020",
+"Bohnhoff_Tims_2019" , "Campbell_Goldenrod_2019","Gould_BeithRoadNorth_2019",
+"Gingerich_Malacarne1_2019","Hord_F98_2019" , "Larson_EB2_2019",
+"Wendte_LaueLib80_2019")
+
+
+#--- source functions ---#
+source(here("Codes/DIFM/Functions/prepare.R"))
+
+#--- make pdf output smaller in size ---#
+pdf.options(useDingbats = TRUE)
+
+#--- field parameters ---#
+source(here("Codes/DIFM/Functions/unpack_field_parameters.R"))
+
+#--- read the variable name dictionary ---#
+dictionary <- fromJSON(
+  file.path(
+    here("Data", "CommonData"),
+    "variable_name_dictionary.json"
+  ),
+  flatten = TRUE
+) %>% 
+data.table()
+
+
+
+# Title-here analysis
+
+## Read the analysis data
+
+get_input <- function(opt_gc_data, c_type, w_zone){
+  opt_gc_data[
+    type == c_type & zone_txt == paste0("Zone ", w_zone), 
+    input_rate
+  ] %>% 
+  round(digits = 2) %>% 
+  format(nsmall = 2)
+}
+
+get_pi <- function(opt_gc_data, c_type, w_zone){
+  opt_gc_data[
+    type == c_type & zone_txt == paste0("Zone ", w_zone),
+    profit_hat
+  ] %>% 
+  round(digits = 2) %>% 
+  format(nsmall = 2)
+}
+
+get_pi_dif <- function(pi_dif_test_zone, w_zone){
+  pi_dif_test_zone[
+    zone_txt == paste0("Zone ", w_zone), 
+    point_est_dif
+  ] %>% 
+  round(digits = 2) %>% 
+  format(nsmall = 2)
+}
+
+
+
+get_pi_ci_whole <- function(whole_profits_test, type_sh){
+
+  pi_up <-whole_profits_test[
+    type_short==paste0(type_sh), 
+    point_est_dif + 1.96 * point_est_dif_se
+  ] %>% 
+  round(digits = 2) %>% 
+  format(nsmall = 2)
+
+  pi_low <- whole_profits_test[
+    type_short==paste0(type_sh), 
+    point_est_dif - 1.96 * point_est_dif_se
+  ] %>% 
+  round(digits = 2) %>% 
+  format(nsmall = 2)
+
+  return(paste0("$", pi_low, " - $", pi_up))
+
+}
+
+get_pi_ci_zone <- function(pi_dif_test_zone, w_zone){
+
+  pi_up <- pi_dif_test_zone[
+    zone_txt == paste0("Zone ", w_zone), 
+    point_est_dif + 1.96 * point_est_dif_se
+  ] %>% 
+  round(digits = 2) %>% 
+  format(nsmall = 2)
+
+  pi_low <- pi_dif_test_zone[
+    zone_txt == paste0("Zone ", w_zone), 
+    point_est_dif - 1.96 * point_est_dif_se
+  ] %>% 
+  round(digits = 2) %>% 
+  format(nsmall = 2)
+
+  return(paste0("$", pi_low, " and $", pi_up))
+
+}
+
+get_t_value <- function(pi_dif_test_zone, w_zone){
+  pi_dif_test_zone[
+    zone_txt == paste0("Zone ", w_zone), 
+    t
+  ] %>% 
+  round(digits = 2) %>% 
+  format(nsmall = 2)
+} 
+
+
+```
+
+```{r read-data-sets, results = "hide", include = TRUE}
+data_fin_list <-list()
+data_list <- list()
+field_vars_list <-list()
+field_plots_list <- list()
+eval_data_list <- list()
+opt_gc_data_list <-list()
+whole_profits_test_list <- list()
+pi_dif_test_zone_list <- list()
+num_zones_list <- list()
+dat_n_y_list <- list()
+dat_all <- list()  
+
+
+
+for (i in 1:length(field_n)){{
+  ffy <-field_n[i] 
+  
+  data_fin <- here("Data/Growers", ffy, "Analysis-Ready/analysis_data.rds") %>% 
+  readRDS() %>% 
+  rename(yield = yield_vol) %>% 
+  setnames(names(.), tolower(names(.))) %>% 
+  filter(!is.na(yield)) %>% 
+  cbind(., st_coordinates(st_centroid(.))) 
+  results <- readRDS(here("Reports", "Growers", ffy, "analysis_results.rds")) %>% 
+  filter(input_type == "N")
+
+  
+  
+data_sf <- results$data[[1]]
+field_vars <- results$field_vars[[1]]
+field_plots <- results$field_plots[[1]]
+eval_data <- results$eval_data[[1]]
+opt_gc_data <- results$opt_gc_data[[1]]
+whole_profits_test <- results$whole_profits_test[[1]]
+pi_dif_test_zone <- results$pi_dif_test_zone[[1]]
+
+num_zones <- data_sf$zone_txt %>% 
+  unique() %>% 
+  length()
+
+data_n_y<-data_sf %>%st_drop_geometry()%>%
+  dplyr::select(yield,input_rate)
+
+dat_all<-data_sf %>%st_drop_geometry
+
+}
+data_list[[i]] <- data_sf
+dat_n_y_list[[i]]  <-data_n_y
+field_vars_list[[i]] <-field_vars
+field_plots_list[[i]] <- field_plots
+eval_data_list[[i]] <- eval_data
+opt_gc_data_list[[i]] <-opt_gc_data
+whole_profits_test_list[[i]] <- whole_profits_test 
+pi_dif_test_zone_list[[i]] <- pi_dif_test_zone
+num_zones_list[[i]] <- num_zones   
+}
+
+
+dat_bind<-bind_rows(dat_n_y_list,.id="id")
+
+all_bind<-bind_rows(dat_all,.id="id") 
+   
+opt_v_list<-list()
+for (i in 1:length(field_n_2021)){
+  opt_v_list[[i]]<-opt_gc_data_list[[i]]%>%filter(type=='opt_v')%>%
+    dplyr::select(input_rate,yield_hat)
+}
+
+opt_v_bind <-bind_rows(opt_v_list,.id='id')
+
+             
+point_plot <-ggplot(opt_v_bind,aes(input_rate,yield_hat,colour=id)) + 
+geom_point(size=2) +
+  stat_smooth(method = "lm", formula = y ~ x + I(x^2) , size = 0.2,lwd=3)
+
+
+curv_plot <- ggplot(dat_bind,aes(input_rate,yield,colour=id)) + 
+stat_smooth(method = "lm", formula = y ~ x + I(x^2), size = 0.5,lwd=1)
+
+
+
+```
+
+
+```{r read-data-sets, results = "show", include = TRUE}
+
+curv_plot 
+
+print(field_vars_list)
+
+```
+
+
+```{r read-data-sets, results = "show", include = TRUE}
+library(qwraps2)
+library(stargazer)
+
+
+
+group_sum <-st(all_bind,group='id')
+
+all_bind
+
+
+```
+
+
+
+
+
+
+
+

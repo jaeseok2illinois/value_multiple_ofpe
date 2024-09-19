@@ -1,0 +1,463 @@
+---
+title: "Extreme Gradient Boosting"
+author: "Jae Hwang"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: true
+    number_sections: true
+---
+
+```{r setup, cache = F, echo = F}
+library(knitr)
+library(here)
+
+knitr::opts_chunk$set(
+  cache = TRUE,
+  echo = TRUE,
+  error = TRUE,
+  warning = FALSE,
+  fig.retina = 6,
+  message = FALSE
+)
+
+options(knitr.duplicate.label = "allow")
+
+#--- working field-year ---#
+ffy <- "Gould_DamgaardWest_2021" 
+
+#--- root directory ---#
+opts_knit$set(root.dir = here("Data", "Growers", ffy))
+
+```
+
+
+
+```{r a02-pacakages, cache = FALSE}
+library(sf)
+library(tmap)
+library(mgcv)
+library(ggcorrplot)
+library(R.utils)
+library(patchwork)
+library(scam)
+library(parallel)
+library(dplyr)
+library(tidyverse)
+library(corrplot)
+library(data.table)
+library(GWmodel)
+library(mgcv)
+library(jsonlite)
+
+source(here("Codes/DIFM/Functions/prepare.R"))
+
+
+```
+
+
+```{r colors and table width, cache = TRUE}
+colorize <- function(x, color) {
+  if (knitr::is_latex_output()) {
+    sprintf("\\textcolor{%s}{%s}", color, x)
+  } else if (knitr::is_html_output()) {
+    sprintf("<span style='color: %s;'>%s</span>", color,
+      x)
+  } else x
+}
+
+FitFlextableToPage <- function(ft, pgwidth = 6){
+
+  ft_out <- ft %>% autofit()
+
+  ft_out <- width(ft_out, width = dim(ft_out)$widths*pgwidth /(flextable_dim(ft_out)$widths))
+  return(ft_out)
+}
+
+```
+
+
+```{r setting, results = "hide", include = TRUE}
+
+library(xgboost)
+library(caret)  
+library(e1071)  
+library(DiagrammeR)
+
+
+field_n <- c("Campbell_Goldenrod_2021","Chrz_42ac_2021","Gould_DamgaardWest_2021",  
+"GrigsbyGP_Field32_2021", "Hord_F98_2021","Hord_F104_2021",
+"Isermann_Florence80_2021","Nelson_DJWest_2021","Nelson_Dougshome_2021",
+"Pistorius_SyfordNorthEast_2021","Sasse_JensenWest_2021","Wendte_LaueLib80_2021",
+# "Bohnhoff_Adams_2020",
+"Bohnhoff_Schormann_2020","Gould_Maras_2020", "Hord_F17_2020","Larson_BF2_2020","Nelson_Wirth_2020",
+"Rohrscheib_AlmyMain_2020","Sasse_JensenEast_2020",
+"Bohnhoff_Tims_2019", 
+"Campbell_Goldenrod_2019","Gould_BeithRoadNorth_2019","Gingerich_Malacarne1_2019",
+"Hord_F98_2019" ,"Wendte_LaueLib80_2019",
+"Bohnhoff_Adams_2018","Bohnhoff_Schormann_2018","Gingerich_Field2_2018",
+"Hord_F17_2018","Larson_OC1_2018","Nelson_Wirth_2018",
+"Rohrscheib_AlmyMain_2018","Sasse_JensenEast_2018","Wendte_Snider_2018",
+"Bohnhoff_Tims_2017","Gingerich_Malacarne1_2017","Hord_F98_2017",
+"Larson_EB2_2017","Nelson_Dougshome_2017","Overton_Richter_2017",
+"Sasse_JensenWest_2017","Wendte_LaueLib80_2017",
+"Bohnhoff_Adams_2016","Bohnhoff_Schormann_2016",
+"Rohrscheib_Brach_2016")
+
+
+#/*~~~~~~~~~~~~~~~~~~~~~~*/
+#' ### variable name dictionary
+#/*~~~~~~~~~~~~~~~~~~~~~~*/
+
+ffy <- "Gould_DamgaardWest_2021" 
+
+source(here("Codes/DIFM/Functions/unpack_field_parameters.R"))
+
+crop_price_table <- fread("/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Data/CommonData/CropPrice.csv") %>% 
+  setnames(names(.), tolower(names(.))) %>% 
+  filter(type == "current") %>% 
+  rename(crop_price = price)
+
+input_price_table <- fread("/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Data/CommonData/InputPrice.csv") %>% 
+  setnames(names(.), tolower(names(.)))
+
+#/*~~~~~~~~~~~~~~~~~~~~~~*/
+#' ### variable name dictionary
+#/*~~~~~~~~~~~~~~~~~~~~~~*/
+dictionary <- jsonlite::fromJSON(
+  file.path(
+   "/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Data/CommonData",
+    "variable_name_dictionary.json"
+  ),
+  flatten = TRUE
+) %>% 
+data.table()
+
+
+```
+
+```{r data-prep, cache = F, results = "hide"}
+
+##### Read Field1 Data
+
+data_sf <- readRDS(paste0("/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Data/Growers/", ffy, "/Analysis-Ready/analysis_data.rds")) %>%
+  rename(yield = yield_vol) %>%
+  setnames(names(.), tolower(names(.))) %>%
+  filter(!is.na(yield)) %>%
+  cbind(., st_coordinates(st_centroid(.)))
+
+
+
+### Read Combined data
+data_fin_list <-readRDS('/Users/hwangjaeseok/Desktop/Jae-2nd-Year-Paper/boost_ready.rds')
+
+
+### Make independent variables to be consistent ( exclude EC variables)
+
+data_comb_list <- list()
+
+for(i in 1:length(data_fin_list)){
+  if(length(data_fin_list[[i]]!=0)){
+data_comb <-data_fin_list[[i]]%>%dplyr::select(yield,n_rate,elevation,slope,aspect,curv,twi, clay,sand,silt,water_storage)
+  }else{
+    data_comb<-list()
+  }
+   
+  data_comb_list[[i]] <- data_comb
+}
+
+### Exclude field with no final data 
+which(summary(data_comb_list)[,1]==" 0")
+field_comb <-field_n[-c(32,40)]
+
+
+
+### Bind data to convert the data into matrix foem
+dat_comb_bind <-bind_rows(data_comb_list,.id="id")
+
+
+# summary(dat_comb_bind)
+names(dat_comb_bind)
+class(dat_comb_bind$id)
+
+
+#dat_comb_bind$id <- as.factor(dat_comb_bind$id) 
+
+
+##### Derive Gam analysis results of field1
+
+analysis_res_g <- trial_info %>% 
+  left_join(crop_price_table, by = "crop") %>% 
+  mutate(data = rep(list(data_sf), nrow(.))) %>% 
+  rowwise() %>% 
+  mutate(
+    data = list(
+      setnames(
+        data.table::copy(data),
+        paste0(tolower(input_type), "_rate"),
+        "input_rate"
+      )
+    )
+  ) %>%  
+  mutate(
+    field_vars = list(
+      find_field_vars(data)
+    )
+  ) %>% 
+  mutate(
+    data = list(
+      gen_y_res(data, field_vars)
+    )
+  ) %>% 
+  mutate(
+    data = list(
+      run_gwr(subset(data, input_rate != 0), "input_rate")  
+    )
+  ) 
+
+analysis_res_m <- analysis_res_g %>% 
+  mutate(
+    data = list(
+      define_mz(
+        data = data, 
+        max_num_zones = 1, 
+        min_obs = 300
+      ) 
+    )
+  )
+
+analysis_res_gam <- analysis_res_m %>% 
+  mutate(gam_res = list(
+    run_scam_gam(data = data, field_vars = field_vars)
+  ))   
+
+analysis_res_e <- analysis_res_gam %>% 
+  #=== single average observation by zone ===#
+  mutate(data_for_eval = list(
+    make_data_for_eval(
+      data = data,
+      est = gam_res
+    )
+  )) %>% 
+  #=== input rate sequence by zone to be tested ===#
+  mutate(input_rate_seq = list(
+    data.table(data)[, .(
+      input_rate = seq(
+        quantile(input_rate, 0.025),
+        quantile(input_rate, 0.975),
+        length = 100
+      )
+    ),
+    by = zone_txt]
+  )) %>% 
+  #=== predict yield values at different input rates ===#
+  mutate(eval_data = list(
+    predict_yield_range(
+      data_for_eval = data_for_eval, 
+      input_rate_seq = input_rate_seq,
+      est = gam_res
+    ) %>% 
+    .[, type := "opt_v"]%>% 
+    .[, .(
+      input_rate, zone_txt, type, yield_hat, yield_hat_se
+    )]
+  )) %>% 
+  #=== Adjust yield values to match up with actual yields (this is purely for figures below) ===#
+  mutate(
+    #=== mean predicted yield ===#
+    mean_yield_hat_opt = 
+    list(
+      eval_data[, .(mean_yield_hat = mean(yield_hat)), by = zone_txt]
+    ), 
+    #=== mean actual yield by zone ===#
+    mean_yield_actual = 
+    list(
+      data.table(data)[, 
+      .(mean_yield_actual = mean(yield)), 
+      by = zone_txt
+      ]
+    ),
+    #=== shift yield so that figures look ===#
+    yield_shift_opt = 
+    list(
+      mean_yield_actual[mean_yield_hat_opt, on = "zone_txt"] %>% 
+        .[, yield_shift :=  mean_yield_actual - mean_yield_hat] %>% 
+        .[, .(zone_txt, yield_shift)]
+    ),
+    eval_data = 
+    list(
+      eval_data %>% 
+      yield_shift_opt[., on = "zone_txt"] %>% 
+      .[, yield_hat := yield_hat + yield_shift] %>% 
+      .[, profit_hat := crop_price * yield_hat - price * input_rate] %>% 
+      .[, profit_hat_se := crop_price * yield_hat_se] 
+    )
+  ) %>% 
+  dplyr::select(
+    - mean_yield_hat_opt, 
+    - yield_shift_opt, 
+    - mean_yield_actual
+  ) %>% 
+  mutate(opt_input_data = list(
+   opt_input_data <- eval_data %>% 
+    .[, .SD[profit_hat == max(profit_hat), ], by = zone_txt] %>% 
+    setnames("input_rate", "opt_input") 
+  )) %>% 
+  #=== assign optimal variable input rate to the data ===#
+  mutate(data = list(
+    left_join(
+      data, 
+      opt_input_data,
+      by = "zone_txt"
+    )
+  )) %>% 
+  #=== find the optimal uniform rate ===#
+  mutate(data = list(
+    mutate(
+      data, 
+      opt_input_u = find_opt_u(
+        data = data, 
+        gam_res = gam_res,
+        crop_price = crop_price,
+        input_price = price
+      )
+    )
+  ))
+
+```
+
+```{r xgboost set up,echo=T, include = TRUE}
+
+# saveRDS(dat_comb_bind,'/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Codes/Codes_indiv/JH/dat_comb_bind.rds') 
+
+ dat_comb_bind$id <- as.factor(dat_comb_bind$id) 
+
+
+###############################################
+######### Prepare xg_boosting for field1 #####
+
+##### Exclude field1 data from training
+
+#### Combined data excluding field1
+dat_boost_other <- dat_comb_bind %>%filter(id!=1) %>%
+                st_drop_geometry() %>%
+               dplyr::select(-geom)
+ 
+#### Field1 data
+dat_boost_1 <- dat_comb_bind %>%filter(id==1) %>%
+                st_drop_geometry() %>%
+               dplyr::select(-geom)
+              
+             
+
+### Partitioning to split data into training and testing 
+
+### Training data ( All but excluded field1)
+### Test data ( Field1 data)
+
+dat_train <- dat_boost_other
+dat_test <- dat_boost_1
+
+
+x_dat_train <- data.matrix(dat_train[,-c(1,2)])
+y_dat_train <- dat_train[,2]
+ 
+x_dat_test <- data.matrix(dat_test[,-c(1,2)])
+y_dat_test <- dat_test[,2]
+
+
+# convert the train and test data into xgboost matrix type.
+xgb_train = xgb.DMatrix(data=x_dat_train, label=y_dat_train)
+
+
+##### train a model using our training data
+
+#  xgb_model <- xgboost( data = xgb_train,
+#                 objective = "reg:squarederror",
+#                  max.depth=4,        # maxx depth
+#                  nrounds=100)            # max number of boosting iterations
+# 
+
+#  saveRDS(xgb_model,'/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Codes/Codes_indiv/JH/xgb_model.rds')
+
+
+xgb_model<- readRDS('/Users/hwangjaeseok/Library/CloudStorage/Box-Box/DIFM_HQ/Codes/Codes_indiv/JH/xgb_model.rds')
+
+
+##### Make TEST and Prediction ######
+
+n_rate_seq <-seq(
+        quantile(x_dat_test[,1], 0.025),
+        quantile(x_dat_test[,1], 0.975),
+        length = 100
+      )
+
+
+pred_dat <- list()
+
+for(i in 1:100){ 
+x_dat_test2 <- x_dat_test
+x_dat_test2[,1]<- n_rate_seq[i]
+
+xgb_test = xgb.DMatrix(data=x_dat_test2)
+
+
+y_hat = predict(xgb_model, xgb_test)
+
+
+## Data with Prediction on n_rate sequnce from 1(lowest) to 100(highest)
+pred_dat[[i]]<-data.table(cbind(y_hat,x_dat_test2))
+}
+
+
+pred_comb <-bind_rows(pred_dat,.id="n_seq")
+pred_comb$n_seq <- as.numeric(pred_comb$n_seq)
+
+
+pred_yield_plot <- ggplot(data=pred_comb) +
+  geom_density(aes(x=y_hat, group=n_seq, colour=n_seq,alpha=0.5, linetype='dashed'),
+               adjust=7) + 
+       xlim(0,300) +
+  scale_colour_gradient(low = "white",high = "red") +
+ ggtitle("Distribution of predicted yield(bu/ac) by each n_rate sequence")
+
+
+### Distribution of Predicted Yield by N-sequence from low to high 
+pred_yield_plot
+
+
+
+ prof_est_comb  <- pred_comb %>% mutate(profit_hat = 5.5 * y_hat - 0.4 * n_rate) %>%
+   group_by(n_seq) %>%summarise(mean_y_hat = mean(y_hat),sd_y_hat =sd(y_hat), n_rate = mean(n_rate),avg_prof = mean(profit_hat)) %>%data.table()
+ 
+
+ 
+ prof_by_n_seq <- ggplot(data=prof_est_comb,aes(y=avg_prof,x=n_seq,colour=n_seq)) +
+  geom_point() +
+  geom_smooth()+
+       ylim(500,900) + xlim(0,100) +
+  scale_colour_gradient(low = "white",high = "red") +
+ ggtitle("Distribution of Avg Profit by each n_rate sequence")
+ 
+### Distribution of Predicted Average Profit of field1 by n_rate sequence
+### uniform n_rate is applied for the field1 
+ 
+prof_by_n_seq 
+
+opt_n_by_train <-prof_est_comb %>% 
+    .[, .SD[avg_prof == max(avg_prof), ]] 
+
+ 
+  
+opt_n_field1 <-analysis_res_e$opt_input_data
+
+
+#### Max Profit of Field1 by Xgboost training and prediction 
+opt_n_by_train
+ 
+#### Max Profit of Field1 by DIFM_HQ Gam regression  
+opt_n_field1
+
+```
